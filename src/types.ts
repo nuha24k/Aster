@@ -16,7 +16,13 @@ export interface WorkspaceInfo {
   id: string;
   name: string;
   root_path: string;
-  layout: LayoutNode;
+  layout: LayoutNode | null;
+}
+
+export function getLayoutLeaves(node: LayoutNode | null): string[] {
+  if (!node) return [];
+  if (node.type === "Surface") return [node.surfaceId];
+  return [...getLayoutLeaves(node.first), ...getLayoutLeaves(node.second)];
 }
 
 export type AgentStatus = "Idle" | "Working" | "Blocked" | "Done";

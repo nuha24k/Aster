@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { WorkspaceInfo, TerminalPane, AgentStatus, LayoutNode, SplitDirection } from "./types";
+import { WorkspaceInfo, TerminalPane, AgentStatus, LayoutNode, SplitDirection, getLayoutLeaves } from "./types";
 
 interface WorkspaceStore {
   workspaces: WorkspaceInfo[];
@@ -10,13 +10,16 @@ interface WorkspaceStore {
   activeTerminalId: string | null;
   /** Current working directory of the active terminal — drives Editor rootPath */
   activeTerminalCwd: string | null;
+  /** App launch CWD from Rust backend */
+  appDefaultCwd: string | null;
   sidebarOpen: boolean;
 
   // Actions
   setWorkspaces: (workspaces: WorkspaceInfo[]) => void;
-  createWorkspace: (name: string, root_path: string) => void;
+  createWorkspace: (name: string, root_path?: string) => void;
   switchWorkspace: (id: string) => void;
   setActiveSurface: (surface: "Terminal" | "Editor" | "Git" | "Logs") => void;
+  openTerminal: (workspaceId?: string) => void;
   addTerminal: (term: TerminalPane) => void;
   setActiveTerminal: (id: string) => void;
   updateTerminalStatus: (id: string, status: AgentStatus) => void;
@@ -32,72 +35,124 @@ interface WorkspaceStore {
   updateActiveTerminalCwd: (cwd: string) => void;
   focusNextPane: () => void;
   focusPrevPane: () => void;
-  /** Initialise workspace root path from the backend (call once on app start) */
-  initDefaultWorkspacePath: (path: string) => void;
+  initAppCwd: (path: string) => void;
 }
-
-
-const INITIAL_TERMINAL_ID = "term_1";
-
-const DEFAULT_WORKSPACE: WorkspaceInfo = {
-  id: "ws_aster",
-  name: "Aster Workspace",
-  // Will be overwritten by initDefaultWorkspacePath() on mount
-  root_path: "",
-  layout: { type: "Surface", surfaceId: INITIAL_TERMINAL_ID },
-};
 
 export const useWorkspaceStore = create<WorkspaceStore>()(
   persist(
     (set, get) => ({
-      workspaces: [DEFAULT_WORKSPACE],
-      currentWorkspaceId: "ws_aster",
+      workspaces: [],
+      currentWorkspaceId: null,
       activeSurface: "Terminal",
-      terminals: [{ id: INITIAL_TERMINAL_ID, title: "Terminal 1", status: "Idle" }],
-      activeTerminalId: INITIAL_TERMINAL_ID,
+      terminals: [],
+      activeTerminalId: null,
       activeTerminalCwd: null,
+      appDefaultCwd: null,
       sidebarOpen: true,
 
       setWorkspaces: (workspaces) => set({ workspaces }),
 
-      createWorkspace: (name, root_path) => {
+      createWorkspace: (name, root_path = "") => {
+        const trimmedPath = root_path.trim();
+        let finalName = name.trim();
+        if (!finalName && trimmedPath) {
+          finalName = trimmedPath.split(/[/\\]/).filter(Boolean).pop() || "Workspace";
+        } else if (!finalName) {
+          finalName = "Workspace";
+        }
+
         const id = `ws_${Date.now()}`;
-        const termId = `term_${Date.now()}`;
         const newWs: WorkspaceInfo = {
           id,
-          name,
-          root_path,
-          layout: { type: "Surface", surfaceId: termId },
+          name: finalName,
+          root_path: trimmedPath,
+          layout: null, // NO terminal created automatically!
         };
+
         set((state) => ({
           workspaces: [...state.workspaces, newWs],
           currentWorkspaceId: id,
-          terminals: [...state.terminals, { id: termId, title: "Terminal 1", status: "Idle" }],
-          activeTerminalId: termId,
+          activeTerminalId: null,
         }));
       },
 
       switchWorkspace: (id) => {
         const ws = get().workspaces.find((w) => w.id === id);
         if (!ws) return;
-        set({ currentWorkspaceId: id });
+
+        const leaves = getLayoutLeaves(ws.layout);
+        const nextActiveId = leaves.length > 0 ? leaves[0] : null;
+
+        set({
+          currentWorkspaceId: id,
+          activeTerminalId: nextActiveId,
+        });
       },
 
       deleteWorkspace: (id) => {
         set((state) => {
-          if (state.workspaces.length <= 1) return state;
-          const remaining = state.workspaces.filter((w) => w.id !== id);
-          const nextWsId =
-            state.currentWorkspaceId === id ? remaining[0].id : state.currentWorkspaceId;
+          const remainingWorkspaces = state.workspaces.filter((w) => w.id !== id);
+          let nextWsId = state.currentWorkspaceId;
+          if (state.currentWorkspaceId === id) {
+            nextWsId = remainingWorkspaces.length > 0 ? remainingWorkspaces[0].id : null;
+          }
+
+          const nextWs = remainingWorkspaces.find((w) => w.id === nextWsId);
+          const nextLeaves = nextWs ? getLayoutLeaves(nextWs.layout) : [];
+          const nextActiveId = nextLeaves.length > 0 ? nextLeaves[0] : null;
+
+          const remainingLeaves = remainingWorkspaces.flatMap((w) => getLayoutLeaves(w.layout));
+          const remainingTerminals = state.terminals.filter((t) => remainingLeaves.includes(t.id));
+
           return {
-            workspaces: remaining,
+            workspaces: remainingWorkspaces,
             currentWorkspaceId: nextWsId,
+            activeTerminalId: nextActiveId,
+            terminals: remainingTerminals,
           };
         });
       },
 
-
       setActiveSurface: (surface) => set({ activeSurface: surface }),
+
+      openTerminal: (workspaceId) => {
+        const state = get();
+        const targetWsId = workspaceId || state.currentWorkspaceId;
+        if (!targetWsId) return;
+
+        const ws = state.workspaces.find((w) => w.id === targetWsId);
+        if (!ws) return;
+
+        const newTermId = `term_${Date.now()}`;
+        const termCwd = ws.root_path || state.appDefaultCwd || undefined;
+        const newTerm: TerminalPane = {
+          id: newTermId,
+          title: `Terminal ${state.terminals.length + 1}`,
+          cwd: termCwd,
+          status: "Idle",
+        };
+
+        if (!ws.layout) {
+          const updatedWs: WorkspaceInfo = {
+            ...ws,
+            layout: { type: "Surface", surfaceId: newTermId },
+          };
+          set((s) => ({
+            workspaces: s.workspaces.map((w) => (w.id === ws.id ? updatedWs : w)),
+            terminals: [...s.terminals, newTerm],
+            activeTerminalId: newTermId,
+          }));
+        } else {
+          const leaves = getLayoutLeaves(ws.layout);
+          const targetSurfaceId =
+            state.activeTerminalId && leaves.includes(state.activeTerminalId)
+              ? state.activeTerminalId
+              : leaves[0];
+          if (targetSurfaceId) {
+            state.splitPane(targetSurfaceId, "Vertical");
+          }
+        }
+      },
 
       addTerminal: (term) =>
         set((state) => ({
@@ -114,10 +169,14 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
 
       splitPane: (targetSurfaceId, direction) => {
         const state = get();
+        const currentWs = state.workspaces.find((w) => w.id === state.currentWorkspaceId);
+        if (!currentWs || !currentWs.layout) return;
+
         const newId = `term_${Date.now()}`;
         const newTerm: TerminalPane = {
           id: newId,
           title: `Terminal ${state.terminals.length + 1}`,
+          cwd: currentWs.root_path || state.appDefaultCwd || undefined,
           status: "Idle",
         };
 
@@ -141,9 +200,6 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           };
         };
 
-        const currentWs = state.workspaces.find((w) => w.id === state.currentWorkspaceId);
-        if (!currentWs) return;
-
         const updatedWs = { ...currentWs, layout: insertSplit(currentWs.layout) };
 
         set((s) => ({
@@ -155,8 +211,8 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
 
       closePane: (surfaceId) => {
         set((state) => {
-          const remainingTerminals = state.terminals.filter((t) => t.id !== surfaceId);
-          const nextActiveId = remainingTerminals.length > 0 ? remainingTerminals[0].id : null;
+          const currentWs = state.workspaces.find((w) => w.id === state.currentWorkspaceId);
+          if (!currentWs || !currentWs.layout) return state;
 
           const removeNode = (node: LayoutNode): LayoutNode | null => {
             if (node.type === "Surface") {
@@ -170,14 +226,15 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
             return { ...node, first, second };
           };
 
-          const currentWs = state.workspaces.find((w) => w.id === state.currentWorkspaceId);
-          if (!currentWs) return state;
+          const newLayout = removeNode(currentWs.layout);
+          const remainingTerminals = state.terminals.filter((t) => t.id !== surfaceId);
 
-          const newLayout =
-            removeNode(currentWs.layout) || {
-              type: "Surface",
-              surfaceId: nextActiveId || INITIAL_TERMINAL_ID,
-            };
+          const leaves = getLayoutLeaves(newLayout);
+          const nextActiveId =
+            state.activeTerminalId === surfaceId
+              ? leaves[0] || null
+              : state.activeTerminalId;
+
           const updatedWs = { ...currentWs, layout: newLayout };
 
           return {
@@ -193,16 +250,11 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       setLayoutRatio: (firstSurfaceId, ratio) => {
         set((state) => {
           const currentWs = state.workspaces.find((w) => w.id === state.currentWorkspaceId);
-          if (!currentWs) return state;
+          if (!currentWs || !currentWs.layout) return state;
 
           const updateRatio = (node: LayoutNode): LayoutNode => {
             if (node.type === "Surface") return node;
-            // Match Split whose first child (eventually) contains firstSurfaceId
-            const firstLeaves = (n: LayoutNode): string[] =>
-              n.type === "Surface"
-                ? [n.surfaceId]
-                : [...firstLeaves(n.first), ...firstLeaves(n.second)];
-            if (firstLeaves(node.first).includes(firstSurfaceId)) {
+            if (getLayoutLeaves(node.first).includes(firstSurfaceId)) {
               return { ...node, ratio: Math.min(85, Math.max(15, ratio)) };
             }
             return { ...node, first: updateRatio(node.first), second: updateRatio(node.second) };
@@ -236,38 +288,36 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       updateActiveTerminalCwd: (cwd) => set({ activeTerminalCwd: cwd }),
 
       focusNextPane: () => {
-        const { terminals, activeTerminalId } = get();
-        if (terminals.length === 0) return;
-        const currentIndex = terminals.findIndex((t) => t.id === activeTerminalId);
-        const nextIndex = (currentIndex + 1) % terminals.length;
-        set({ activeTerminalId: terminals[nextIndex].id });
+        const { workspaces, currentWorkspaceId, activeTerminalId } = get();
+        const currentWs = workspaces.find((w) => w.id === currentWorkspaceId);
+        if (!currentWs || !currentWs.layout) return;
+
+        const currentLeaves = getLayoutLeaves(currentWs.layout);
+        if (currentLeaves.length === 0) return;
+
+        const currentIndex = currentLeaves.findIndex((id) => id === activeTerminalId);
+        const nextIndex = (currentIndex + 1) % currentLeaves.length;
+        set({ activeTerminalId: currentLeaves[nextIndex] });
       },
 
       focusPrevPane: () => {
-        const { terminals, activeTerminalId } = get();
-        if (terminals.length === 0) return;
-        const currentIndex = terminals.findIndex((t) => t.id === activeTerminalId);
-        const prevIndex = (currentIndex - 1 + terminals.length) % terminals.length;
-        set({ activeTerminalId: terminals[prevIndex].id });
+        const { workspaces, currentWorkspaceId, activeTerminalId } = get();
+        const currentWs = workspaces.find((w) => w.id === currentWorkspaceId);
+        if (!currentWs || !currentWs.layout) return;
+
+        const currentLeaves = getLayoutLeaves(currentWs.layout);
+        if (currentLeaves.length === 0) return;
+
+        const currentIndex = currentLeaves.findIndex((id) => id === activeTerminalId);
+        const prevIndex = (currentIndex - 1 + currentLeaves.length) % currentLeaves.length;
+        set({ activeTerminalId: currentLeaves[prevIndex] });
       },
 
-      initDefaultWorkspacePath: (path) =>
-        set((state) => {
-          // Only update the default workspace if its root_path is still empty
-          const updatedWorkspaces = state.workspaces.map((ws) => {
-            if (ws.id === "ws_aster" && ws.root_path === "") {
-              const name = path.split(/[/\\]/).filter(Boolean).pop() || "Workspace";
-              return { ...ws, name, root_path: path };
-            }
-            return ws;
-          });
-          return { workspaces: updatedWorkspaces };
-        }),
+      initAppCwd: (path) => set({ appDefaultCwd: path }),
     }),
     {
       name: "aster-workspace-state",
       storage: createJSONStorage(() => localStorage),
-      // Only persist layout/workspace data — not runtime PTY state
       partialize: (state) => ({
         workspaces: state.workspaces,
         currentWorkspaceId: state.currentWorkspaceId,

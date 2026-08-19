@@ -9,7 +9,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { AgentPanel } from "./components/AgentPanel";
 import { useWorkspaceStore } from "./store";
 import { safeInvoke, isTauriEnvironment } from "./utils/tauri";
-import { Bot } from "lucide-react";
+import { Bot, FolderPlus, Terminal as TermIcon, Plus } from "lucide-react";
 
 export const App: React.FC = () => {
   const {
@@ -18,28 +18,29 @@ export const App: React.FC = () => {
     activeSurface,
     activeTerminalId,
     activeTerminalCwd,
+    openTerminal,
+    createWorkspace,
     splitPane,
     closePane,
     toggleSidebar,
     focusNextPane,
     focusPrevPane,
-    initDefaultWorkspacePath,
+    initAppCwd,
   } = useWorkspaceStore();
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId);
 
-  // On first mount: fetch the real project root from Rust so terminal never
-  // starts in src-tauri and Editor always has a sane default path.
+  // On first mount: fetch the real project root from Rust so app default CWD is known.
   useEffect(() => {
     if (!isTauriEnvironment()) return;
     safeInvoke<string>("get_app_cwd")
       .then((cwd) => {
-        if (cwd) initDefaultWorkspacePath(cwd);
+        if (cwd) initAppCwd(cwd);
       })
       .catch(() => {});
-  }, []);
+  }, [initAppCwd]);
 
   // Global Keyboard Shortcuts
   useEffect(() => {
@@ -92,35 +93,90 @@ export const App: React.FC = () => {
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <main className="flex-1 bg-zinc-950 relative overflow-hidden p-1 flex">
-
-          {/* ─── Terminal Surface ───────────────────────────────────────────
-              ALWAYS kept in DOM so PTY sessions are never destroyed on
-              surface switch. Visibility is toggled via CSS only.
-          ──────────────────────────────────────────────────────────────── */}
-          {currentWorkspace && (
-            <div
-              className="relative flex-1 w-full h-full min-h-0 min-w-0"
-              style={{ display: activeSurface === "Terminal" ? "flex" : "none" }}
-            >
-              <LayoutNodeRenderer
-                node={currentWorkspace.layout}
-                cwd={currentWorkspace.root_path}
-              />
+          {/* ─── No Active Workspace State ───────────────────────────────── */}
+          {!currentWorkspace ? (
+            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-zinc-900/30 border border-zinc-800/60 rounded-lg m-2">
+              <div className="w-12 h-12 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-indigo-400 mb-4 shadow-inner">
+                <FolderPlus size={24} />
+              </div>
+              <h2 className="text-sm font-bold text-zinc-100 mb-1 tracking-wide">No Workspace Selected</h2>
+              <p className="text-xs text-zinc-400 max-w-sm mb-6 leading-relaxed">
+                Create a new workspace or open a project folder to start working with terminals, editor, and git.
+              </p>
+              <button
+                onClick={async () => {
+                  if (isTauriEnvironment()) {
+                    try {
+                      const path = await safeInvoke<string | null>("open_folder_dialog");
+                      if (path) {
+                        createWorkspace("", path);
+                        return;
+                      }
+                    } catch (_) {}
+                  }
+                  createWorkspace("New Workspace");
+                }}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium px-4 py-2 rounded shadow-md transition-colors flex items-center space-x-2 active:scale-95"
+              >
+                <Plus size={14} />
+                <span>Create Workspace</span>
+              </button>
             </div>
-          )}
+          ) : (
+            <>
+              {/* ─── Terminal Surface ───────────────────────────────────────────
+                  ALWAYS kept in DOM when layout exists so PTY sessions are
+                  never destroyed on surface switch. Visibility toggled via CSS.
+              ──────────────────────────────────────────────────────────────── */}
+              {activeSurface === "Terminal" && !currentWorkspace.layout ? (
+                <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-zinc-900/30 border border-zinc-800/60 rounded-lg m-2">
+                  <div className="w-12 h-12 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-indigo-400 mb-4 shadow-inner">
+                    <TermIcon size={24} />
+                  </div>
+                  <h2 className="text-sm font-bold text-zinc-100 mb-1 tracking-wide">No Terminal Opened</h2>
+                  <p className="text-xs text-zinc-400 max-w-sm mb-1 font-mono">
+                    Workspace: <span className="text-indigo-300 font-semibold">{currentWorkspace.name}</span>
+                  </p>
+                  {currentWorkspace.root_path && (
+                    <p className="text-[11px] text-zinc-500 font-mono max-w-md truncate mb-6">
+                      {currentWorkspace.root_path}
+                    </p>
+                  )}
+                  <button
+                    onClick={() => openTerminal()}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium px-4 py-2 rounded shadow-md transition-colors flex items-center space-x-2 active:scale-95"
+                  >
+                    <Plus size={14} />
+                    <span>Open Terminal</span>
+                  </button>
+                </div>
+              ) : (
+                currentWorkspace.layout && (
+                  <div
+                    className="relative flex-1 w-full h-full min-h-0 min-w-0"
+                    style={{ display: activeSurface === "Terminal" ? "flex" : "none" }}
+                  >
+                    <LayoutNodeRenderer
+                      node={currentWorkspace.layout}
+                      cwd={currentWorkspace.root_path}
+                    />
+                  </div>
+                )
+              )}
 
+              {/* ─── Git Surface ──────────────────────────────────────────────── */}
+              {activeSurface === "Git" && (
+                <GitView repoPath={effectiveRootPath} />
+              )}
 
-          {/* ─── Git Surface ──────────────────────────────────────────────── */}
-          {activeSurface === "Git" && currentWorkspace && (
-            <GitView repoPath={effectiveRootPath} />
-          )}
+              {/* ─── Logs Surface ─────────────────────────────────────────────── */}
+              {activeSurface === "Logs" && <LogsView />}
 
-          {/* ─── Logs Surface ─────────────────────────────────────────────── */}
-          {activeSurface === "Logs" && <LogsView />}
-
-          {/* ─── Editor Surface ───────────────────────────────────────────── */}
-          {activeSurface === "Editor" && currentWorkspace && (
-            <EditorView rootPath={effectiveRootPath} />
+              {/* ─── Editor Surface ───────────────────────────────────────────── */}
+              {activeSurface === "Editor" && (
+                <EditorView rootPath={effectiveRootPath} />
+              )}
+            </>
           )}
 
           {/* Floating AI Agent Trigger Button */}
