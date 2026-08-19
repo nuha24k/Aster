@@ -1,0 +1,11 @@
+[package]
+name = "aster-terminal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aster-core = { path = "../aster-core" }
+portable-pty = "0.8"
+thiserror = "1.0"
+parking_lot = "0.12"
+vte = "0.13"

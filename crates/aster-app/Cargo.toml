@@ -1,0 +1,10 @@
+[package]
+name = "aster-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aster-core = { path = "../aster-core" }
+aster-ui = { path = "../aster-ui" }
+eframe = "0.29"
+egui = "0.29"

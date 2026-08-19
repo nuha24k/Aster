@@ -1,0 +1,9 @@
+[package]
+name = "aster-git"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aster-core = { path = "../aster-core" }
+git2 = "0.19"
+thiserror = "1.0"

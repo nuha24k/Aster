@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/aster-core",
+    "crates/aster-terminal",
+    "crates/aster-git",
+    "crates/aster-editor",
+    "crates/aster-config",
+    "crates/aster-ui",
+    "crates/aster-app",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tempfile = "3.8"

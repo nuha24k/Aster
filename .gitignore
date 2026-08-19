@@ -1,0 +1,9 @@
+# Build & Dependencies
+/target
+/node_modules
+/dist
+
+# Documentation & Phases
+*.md
+docs/*.md
+phases/
