@@ -16,6 +16,7 @@ import {
   FolderInput,
   ExternalLink,
   FileText,
+  FilePlus,
   FileCode,
   FileJson,
   Save,
@@ -164,6 +165,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
       const selected = await invoke<string | null>("open_folder_dialog");
       if (selected) {
         setCurrentRoot(selected);
+        invoke("add_recent_folder", { path: selected }).catch(() => {});
       }
     } catch {
       const p = window.prompt("Enter absolute folder path:", currentRoot);
@@ -242,10 +244,30 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
   // Save active file
   const handleSaveFile = async () => {
     if (!activeTab) return;
+    let path = activeTab.path;
+    if (saveAs || isUntitled(path)) {
+      const chosen = await invoke<string | null>("save_file_dialog", {
+        defaultName: isUntitled(path) ? "untitled.txt" : activeTab.name,
+      }).catch(() => null);
+      if (!chosen) return;
+      path = chosen;
+    }
+    await writeTab(activeTab, path).catch(console.error);
+  };
+
+  // Untitled tabs are skipped — each would need its own Save As dialog.
+  const handleSaveAll = async () => {
+    for (const tab of tabs.filter((t) => t.isDirty && !isUntitled(t.path))) {
+      await writeTab(tab, tab.path).catch(console.error);
+    }
+  };
+
+  const handleRevertFile = async () => {
+    if (!activeTab || isUntitled(activeTab.path)) return;
     try {
-      await invoke("save_file_content", { path: activeTab.path, content: activeTab.content });
+      const content = await invoke<string>("read_file_content", { path: activeTab.path });
       setTabs((prev) =>
-        prev.map((tab) => (tab.path === activeTab.path ? { ...tab, isDirty: false } : tab))
+        prev.map((t) => (t.path === activeTab.path ? { ...t, content, isDirty: false } : t))
       );
       updateGitDiffDecorations(activeTab.path, activeTab.content);
     } catch (err) {
@@ -440,6 +462,119 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [activeTabPath, tabs, closedTabsHistory]);
 
+  // ─── Selection / Edit menu operations on the textarea ─────────────────────
+  const applyEdit = (fn: (s: EditState) => EditState) => {
+    const ta = textareaRef.current;
+    if (!ta || !activeTab) return;
+    const next = fn({
+      value: activeTab.content,
+      selectionStart: ta.selectionStart,
+      selectionEnd: ta.selectionEnd,
+    });
+    if (next.value === activeTab.content) return;
+    handleContentChange(next.value);
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(next.selectionStart, next.selectionEnd);
+    });
+  };
+
+  const findInFile = (backwards = false, query = findQuery) => {
+    const ta = textareaRef.current;
+    if (!ta || !query) return;
+    const hay = ta.value.toLowerCase();
+    const needle = query.toLowerCase();
+    let idx: number;
+    if (backwards) {
+      idx = hay.lastIndexOf(needle, Math.max(ta.selectionStart - 1, 0));
+      if (idx === -1) idx = hay.lastIndexOf(needle);
+    } else {
+      idx = hay.indexOf(needle, ta.selectionEnd);
+      if (idx === -1) idx = hay.indexOf(needle);
+    }
+    if (idx === -1) return;
+    ta.focus();
+    ta.setSelectionRange(idx, idx + query.length);
+  };
+
+  const replaceCurrent = () => {
+    const ta = textareaRef.current;
+    if (!ta || !activeTab || !findQuery) return;
+    const selected = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+    if (selected.toLowerCase() !== findQuery.toLowerCase()) {
+      findInFile();
+      return;
+    }
+    const start = ta.selectionStart;
+    handleContentChange(
+      activeTab.content.slice(0, start) + replaceQuery + activeTab.content.slice(ta.selectionEnd)
+    );
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(start + replaceQuery.length, start + replaceQuery.length);
+      findInFile();
+    });
+  };
+
+  const replaceAll = () => {
+    if (!activeTab || !findQuery) return;
+    handleContentChange(activeTab.content.split(findQuery).join(replaceQuery));
+  };
+
+  const openFind = (withReplace: boolean) => {
+    setActiveSurface("Editor");
+    setFindOpen(true);
+    setReplaceOpen(withReplace);
+    requestAnimationFrame(() => findRef.current?.select());
+  };
+
+  // Auto Save (File menu toggle) — debounced, saved files only.
+  useEffect(() => {
+    if (!autoSave || !activeTab || !activeTab.isDirty || isUntitled(activeTab.path)) return;
+    const t = setTimeout(() => writeTab(activeTab, activeTab.path).catch(console.error), 800);
+    return () => clearTimeout(t);
+  }, [autoSave, activeTab?.content, activeTab?.isDirty]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Native menu bar items that act on the editor.
+  useEffect(() => {
+    const unlisten = listen<string>("menu", ({ payload: id }) => {
+      const token = commentToken(activeTab?.name || "");
+      switch (id) {
+        case "save": handleSaveFile(); break;
+        case "save_as": handleSaveFile(true); break;
+        case "save_all": handleSaveAll(); break;
+        case "revert_file": handleRevertFile(); break;
+        case "auto_save": setAutoSave((v) => !v); break;
+        case "new_file": setActiveSurface("Editor"); handleNewFile(); break;
+        case "new_file_on_disk": setActiveSurface("Editor"); handleNewFileOnDisk(); break;
+        case "open_file": setActiveSurface("Editor"); handleOpenFileDialog(); break;
+        case "close_tab": if (activeTabPath) closeTab(activeTabPath); break;
+        case "close_folder": setCurrentRoot(""); setTree([]); break;
+        case "find_file": setActiveSurface("Editor"); searchRef.current?.focus(); break;
+        // Find/replace is per-surface: the terminal owns it on the Terminal surface.
+        case "find": if (activeSurface === "Editor") openFind(false); break;
+        case "replace": if (activeSurface === "Editor") openFind(true); break;
+        case "find_next": if (activeSurface === "Editor") findInFile(false); break;
+        case "find_prev": if (activeSurface === "Editor") findInFile(true); break;
+        case "toggle_comment": applyEdit((st) => toggleComment(st, token)); break;
+        case "move_line_up": applyEdit((st) => moveLines(st, -1)); break;
+        case "move_line_down": applyEdit((st) => moveLines(st, 1)); break;
+        case "copy_line_up": applyEdit((st) => copyLines(st, -1)); break;
+        case "copy_line_down": applyEdit((st) => copyLines(st, 1)); break;
+        case "duplicate_selection": applyEdit(duplicateSelection); break;
+        case "delete_line": applyEdit(deleteLines); break;
+      }
+    });
+    return () => {
+      unlisten.then((off) => off());
+    };
+  }, [activeTab, tabs, activeTabPath, currentRoot, activeSurface, findQuery, replaceQuery]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleCloseTab = (path: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    closeTab(path);
+  };
+
   const renderFileIcon = (fileName: string) => {
     const ext = fileName.split(".").pop()?.toLowerCase();
     switch (ext) {
@@ -620,6 +755,13 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
             </span>
             <div className="flex items-center space-x-1">
               <button
+                onClick={handleNewFile}
+                className="text-zinc-400 hover:text-zinc-100 p-0.5 rounded transition-colors"
+                title="New File (Cmd/Ctrl+N)"
+              >
+                <FilePlus size={13} />
+              </button>
+              <button
                 onClick={handleOpenFolderDialog}
                 className="text-zinc-400 hover:text-zinc-100 p-0.5 rounded transition-colors"
                 title="Open Folder Dialog..."
@@ -662,6 +804,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
           <div className="relative px-1">
             <Search size={12} className="absolute left-3 top-2 text-zinc-500" />
             <input
+              ref={searchRef}
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}

@@ -1,4 +1,5 @@
 pub mod error;
+pub mod menu;
 pub mod store;
 pub mod git;
 pub mod github;
@@ -255,6 +256,61 @@ async fn open_folder_dialog(app: tauri::AppHandle) -> Result<Option<String>, Str
     rx.await.map_err(|e| e.to_string())
 }
 
+/// Native "Open File" picker. Returns the chosen absolute path.
+#[tauri::command]
+async fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_file(move |p| {
+        let _ = tx.send(p.map(|p| p.to_string()));
+    });
+    rx.await.map_err(|e| e.to_string())
+}
+
+/// Native "Save As" picker. Returns the chosen absolute path.
+#[tauri::command]
+async fn save_file_dialog(app: tauri::AppHandle, default_name: Option<String>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(default_name.unwrap_or_else(|| "untitled.txt".into()))
+        .save_file(move |p| {
+            let _ = tx.send(p.map(|p| p.to_string()));
+        });
+    rx.await.map_err(|e| e.to_string())
+}
+
+/// Remember a folder in the File ▸ Open Recent submenu (most recent first).
+#[tauri::command]
+fn add_recent_folder(path: String, app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    {
+        let mut s = state.store.lock().map_err(|e| e.to_string())?;
+        s.recent_folders.retain(|p| p != &path);
+        s.recent_folders.insert(0, path);
+        s.recent_folders.truncate(10);
+        store::save(&s).map_err(|e| e.to_string())?;
+    }
+    rebuild_menu(&app)
+}
+
+#[tauri::command]
+fn clear_recent_folders(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    {
+        let mut s = state.store.lock().map_err(|e| e.to_string())?;
+        s.recent_folders.clear();
+        store::save(&s).map_err(|e| e.to_string())?;
+    }
+    rebuild_menu(&app)
+}
+
+/// The Open Recent submenu is static once built, so rebuild the whole menu.
+fn rebuild_menu(app: &tauri::AppHandle) -> Result<(), String> {
+    let m = menu::build(app).map_err(|e| e.to_string())?;
+    app.set_menu(m).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Open a directory safely in native OS Finder / Explorer.
 #[tauri::command]
 async fn open_in_finder(path: String) -> Result<(), String> {
@@ -436,8 +492,10 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            app.set_menu(menu::build(app.handle())?)?;
             Ok(())
         })
+        .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
         .invoke_handler(tauri::generate_handler![
             get_current_workspace,
             create_workspace,
@@ -458,6 +516,10 @@ pub fn run() {
             open_folder_dialog,
             open_in_finder,
             generate_commit_message,
+            open_file_dialog,
+            save_file_dialog,
+            add_recent_folder,
+            clear_recent_folders,
 
             spawn_agent_task,
             get_agent_tasks,

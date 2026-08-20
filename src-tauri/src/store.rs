@@ -12,6 +12,9 @@ pub struct PersistedState {
     pub gh_accounts: Vec<String>,
     #[serde(default)]
     pub gh_active: Option<String>,
+    /// Folders opened from the File menu, most recent first (capped at 10).
+    #[serde(default)]
+    pub recent_folders: Vec<String>,
 }
 
 fn state_file() -> PathBuf {
