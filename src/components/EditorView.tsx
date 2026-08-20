@@ -1,5 +1,10 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { useWorkspaceStore } from "../store";
+import {
+  EditState, moveLines, copyLines, duplicateSelection, deleteLines, toggleComment, commentToken,
+} from "../utils/textedit";
 import { FileItem, EditorTabItem } from "../types";
 import { isTauriEnvironment } from "../utils/tauri";
 import {
@@ -8,6 +13,7 @@ import {
   FolderInput,
   ExternalLink,
   FileText,
+  FilePlus,
   FileCode,
   FileJson,
   Save,
@@ -39,6 +45,16 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
   const [tabs, setTabs] = useState<EditorTabItem[]>([]);
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const findRef = useRef<HTMLInputElement>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [replaceQuery, setReplaceQuery] = useState("");
+  const [autoSave, setAutoSave] = useState(false);
+  const setActiveSurface = useWorkspaceStore((s) => s.setActiveSurface);
+  const activeSurface = useWorkspaceStore((s) => s.activeSurface);
 
   const activeTab = tabs.find((t) => t.path === activeTabPath);
 
@@ -91,6 +107,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
       const selected = await invoke<string | null>("open_folder_dialog");
       if (selected) {
         setCurrentRoot(selected);
+        invoke("add_recent_folder", { path: selected }).catch(() => {});
       }
     } catch {
       const p = window.prompt("Enter absolute folder path:", currentRoot);
@@ -174,37 +191,195 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     );
   };
 
-  const handleSaveFile = async () => {
+  // Untitled tabs live under an "untitled:N" pseudo-path until first save.
+  const isUntitled = (path: string) => path.startsWith("untitled:");
+
+  const writeTab = async (tab: EditorTabItem, path: string) => {
+    await invoke("save_file_content", { path, content: tab.content });
+    const name = path.split(/[/\\]/).pop() || path;
+    setTabs((prev) => prev.map((t) => (t.path === tab.path ? { ...t, path, name, isDirty: false } : t)));
+    if (path !== tab.path) {
+      setActiveTabPath(path);
+      loadRoot(currentRoot);
+    }
+  };
+
+  const handleSaveFile = async (saveAs = false) => {
     if (!activeTab) return;
+    let path = activeTab.path;
+    if (saveAs || isUntitled(path)) {
+      const chosen = await invoke<string | null>("save_file_dialog", {
+        defaultName: isUntitled(path) ? "untitled.txt" : activeTab.name,
+      }).catch(() => null);
+      if (!chosen) return;
+      path = chosen;
+    }
+    await writeTab(activeTab, path).catch(console.error);
+  };
+
+  // Untitled tabs are skipped — each would need its own Save As dialog.
+  const handleSaveAll = async () => {
+    for (const tab of tabs.filter((t) => t.isDirty && !isUntitled(t.path))) {
+      await writeTab(tab, tab.path).catch(console.error);
+    }
+  };
+
+  const handleRevertFile = async () => {
+    if (!activeTab || isUntitled(activeTab.path)) return;
     try {
-      await invoke("save_file_content", { path: activeTab.path, content: activeTab.content });
+      const content = await invoke<string>("read_file_content", { path: activeTab.path });
       setTabs((prev) =>
-        prev.map((tab) => (tab.path === activeTab.path ? { ...tab, isDirty: false } : tab))
+        prev.map((t) => (t.path === activeTab.path ? { ...t, content, isDirty: false } : t))
       );
     } catch (err) {
       console.error(err);
     }
   };
 
-  // Keyboard shortcut Cmd/Ctrl+S
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        handleSaveFile();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeTab]);
+  const handleNewFile = () => {
+    const path = `untitled:${Date.now()}`;
+    setTabs((prev) => [...prev, { path, name: "untitled.txt", content: "", isDirty: true }]);
+    setActiveTabPath(path);
+  };
 
-  const handleCloseTab = (path: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  /** File ▸ New File… — asks for the path up front and creates it on disk. */
+  const handleNewFileOnDisk = async () => {
+    const chosen = await invoke<string | null>("save_file_dialog", { defaultName: "untitled.txt" })
+      .catch(() => null);
+    if (!chosen) return;
+    await invoke("save_file_content", { path: chosen, content: "" }).catch(console.error);
+    loadRoot(currentRoot);
+    const name = chosen.split(/[/\\]/).pop() || chosen;
+    handleOpenFile({ name, path: chosen, is_dir: false });
+  };
+
+  const handleOpenFileDialog = async () => {
+    const selected = await invoke<string | null>("open_file_dialog").catch(() => null);
+    if (selected) {
+      const name = selected.split(/[/\\]/).pop() || selected;
+      handleOpenFile({ name, path: selected, is_dir: false });
+    }
+  };
+
+  const closeTab = (path: string) => {
     const remaining = tabs.filter((t) => t.path !== path);
     setTabs(remaining);
     if (activeTabPath === path) {
       setActiveTabPath(remaining.length > 0 ? remaining[remaining.length - 1].path : null);
     }
+  };
+
+  // ─── Selection / Edit menu operations on the textarea ─────────────────────
+  const applyEdit = (fn: (s: EditState) => EditState) => {
+    const ta = textareaRef.current;
+    if (!ta || !activeTab) return;
+    const next = fn({
+      value: activeTab.content,
+      selectionStart: ta.selectionStart,
+      selectionEnd: ta.selectionEnd,
+    });
+    if (next.value === activeTab.content) return;
+    handleContentChange(next.value);
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(next.selectionStart, next.selectionEnd);
+    });
+  };
+
+  const findInFile = (backwards = false, query = findQuery) => {
+    const ta = textareaRef.current;
+    if (!ta || !query) return;
+    const hay = ta.value.toLowerCase();
+    const needle = query.toLowerCase();
+    let idx: number;
+    if (backwards) {
+      idx = hay.lastIndexOf(needle, Math.max(ta.selectionStart - 1, 0));
+      if (idx === -1) idx = hay.lastIndexOf(needle);
+    } else {
+      idx = hay.indexOf(needle, ta.selectionEnd);
+      if (idx === -1) idx = hay.indexOf(needle);
+    }
+    if (idx === -1) return;
+    ta.focus();
+    ta.setSelectionRange(idx, idx + query.length);
+  };
+
+  const replaceCurrent = () => {
+    const ta = textareaRef.current;
+    if (!ta || !activeTab || !findQuery) return;
+    const selected = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+    if (selected.toLowerCase() !== findQuery.toLowerCase()) {
+      findInFile();
+      return;
+    }
+    const start = ta.selectionStart;
+    handleContentChange(
+      activeTab.content.slice(0, start) + replaceQuery + activeTab.content.slice(ta.selectionEnd)
+    );
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(start + replaceQuery.length, start + replaceQuery.length);
+      findInFile();
+    });
+  };
+
+  const replaceAll = () => {
+    if (!activeTab || !findQuery) return;
+    handleContentChange(activeTab.content.split(findQuery).join(replaceQuery));
+  };
+
+  const openFind = (withReplace: boolean) => {
+    setActiveSurface("Editor");
+    setFindOpen(true);
+    setReplaceOpen(withReplace);
+    requestAnimationFrame(() => findRef.current?.select());
+  };
+
+  // Auto Save (File menu toggle) — debounced, saved files only.
+  useEffect(() => {
+    if (!autoSave || !activeTab || !activeTab.isDirty || isUntitled(activeTab.path)) return;
+    const t = setTimeout(() => writeTab(activeTab, activeTab.path).catch(console.error), 800);
+    return () => clearTimeout(t);
+  }, [autoSave, activeTab?.content, activeTab?.isDirty]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Native menu bar items that act on the editor.
+  useEffect(() => {
+    const unlisten = listen<string>("menu", ({ payload: id }) => {
+      const token = commentToken(activeTab?.name || "");
+      switch (id) {
+        case "save": handleSaveFile(); break;
+        case "save_as": handleSaveFile(true); break;
+        case "save_all": handleSaveAll(); break;
+        case "revert_file": handleRevertFile(); break;
+        case "auto_save": setAutoSave((v) => !v); break;
+        case "new_file": setActiveSurface("Editor"); handleNewFile(); break;
+        case "new_file_on_disk": setActiveSurface("Editor"); handleNewFileOnDisk(); break;
+        case "open_file": setActiveSurface("Editor"); handleOpenFileDialog(); break;
+        case "close_tab": if (activeTabPath) closeTab(activeTabPath); break;
+        case "close_folder": setCurrentRoot(""); setTree([]); break;
+        case "find_file": setActiveSurface("Editor"); searchRef.current?.focus(); break;
+        // Find/replace is per-surface: the terminal owns it on the Terminal surface.
+        case "find": if (activeSurface === "Editor") openFind(false); break;
+        case "replace": if (activeSurface === "Editor") openFind(true); break;
+        case "find_next": if (activeSurface === "Editor") findInFile(false); break;
+        case "find_prev": if (activeSurface === "Editor") findInFile(true); break;
+        case "toggle_comment": applyEdit((st) => toggleComment(st, token)); break;
+        case "move_line_up": applyEdit((st) => moveLines(st, -1)); break;
+        case "move_line_down": applyEdit((st) => moveLines(st, 1)); break;
+        case "copy_line_up": applyEdit((st) => copyLines(st, -1)); break;
+        case "copy_line_down": applyEdit((st) => copyLines(st, 1)); break;
+        case "duplicate_selection": applyEdit(duplicateSelection); break;
+        case "delete_line": applyEdit(deleteLines); break;
+      }
+    });
+    return () => {
+      unlisten.then((off) => off());
+    };
+  }, [activeTab, tabs, activeTabPath, currentRoot, activeSurface, findQuery, replaceQuery]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleCloseTab = (path: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    closeTab(path);
   };
 
   const renderFileIcon = (fileName: string) => {
@@ -307,6 +482,13 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
             </span>
             <div className="flex items-center space-x-1">
               <button
+                onClick={handleNewFile}
+                className="text-zinc-400 hover:text-zinc-100 p-0.5 rounded transition-colors"
+                title="New File (Cmd/Ctrl+N)"
+              >
+                <FilePlus size={13} />
+              </button>
+              <button
                 onClick={handleOpenFolderDialog}
                 className="text-zinc-400 hover:text-zinc-100 p-0.5 rounded transition-colors"
                 title="Open Folder Dialog..."
@@ -349,6 +531,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
           <div className="relative px-1">
             <Search size={12} className="absolute left-3 top-2 text-zinc-500" />
             <input
+              ref={searchRef}
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -433,7 +616,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
                 </span>
               </div>
               <button
-                onClick={handleSaveFile}
+                onClick={() => handleSaveFile()}
                 disabled={!activeTab.isDirty}
                 className="flex items-center space-x-1 px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-[11px] font-medium transition-colors"
               >
@@ -442,8 +625,55 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
               </button>
             </div>
 
+            {/* Find / Replace bar (Edit ▸ Find, ⌘F) */}
+            {findOpen && (
+              <div className="bg-zinc-900 border-b border-zinc-800 px-3 py-1.5 flex flex-col gap-1.5 font-mono text-[11px]">
+                <div className="flex items-center gap-1.5">
+                  <Search size={12} className="text-zinc-500 shrink-0" />
+                  <input
+                    ref={findRef}
+                    value={findQuery}
+                    onChange={(e) => setFindQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { e.preventDefault(); findInFile(e.shiftKey); }
+                      if (e.key === "Escape") { setFindOpen(false); textareaRef.current?.focus(); }
+                    }}
+                    placeholder="Find"
+                    className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-indigo-500"
+                  />
+                  <button onClick={() => findInFile(true)} className="px-2 py-1 rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" title="Find Previous (⇧⌘G)">↑</button>
+                  <button onClick={() => findInFile(false)} className="px-2 py-1 rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" title="Find Next (⌘G)">↓</button>
+                  <button
+                    onClick={() => setReplaceOpen((v) => !v)}
+                    className="px-2 py-1 rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                    title="Toggle Replace (⌥⌘F)"
+                  >
+                    ⇄
+                  </button>
+                  <button onClick={() => { setFindOpen(false); textareaRef.current?.focus(); }} className="px-1 py-1 rounded text-zinc-400 hover:bg-zinc-800 hover:text-rose-400">
+                    <X size={12} />
+                  </button>
+                </div>
+
+                {replaceOpen && (
+                  <div className="flex items-center gap-1.5 pl-[18px]">
+                    <input
+                      value={replaceQuery}
+                      onChange={(e) => setReplaceQuery(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && replaceCurrent()}
+                      placeholder="Replace"
+                      className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-indigo-500"
+                    />
+                    <button onClick={replaceCurrent} className="px-2 py-1 rounded bg-zinc-850 border border-zinc-800 text-zinc-300 hover:bg-zinc-800">Replace</button>
+                    <button onClick={replaceAll} className="px-2 py-1 rounded bg-zinc-850 border border-zinc-800 text-zinc-300 hover:bg-zinc-800">All</button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Code Textarea */}
             <textarea
+              ref={textareaRef}
               value={activeTab.content}
               onChange={(e) => handleContentChange(e.target.value)}
               className="flex-1 w-full h-full bg-zinc-950 p-4 font-mono text-xs text-zinc-100 focus:outline-none resize-none leading-relaxed selection:bg-indigo-900/60"
@@ -455,6 +685,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
               <div className="flex items-center space-x-3">
                 <span>UTF-8</span>
                 <span>{activeTab.name.split(".").pop()?.toUpperCase() || "TXT"}</span>
+                {autoSave && <span className="text-emerald-300">Auto Save</span>}
               </div>
               <div>Lines: {lineCount}</div>
             </div>

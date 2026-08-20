@@ -7,6 +7,7 @@ import React, {
 import { LayoutNode } from "../types";
 import { TerminalView, TerminalHandle } from "./TerminalView";
 import { useWorkspaceStore } from "../store";
+import { listen } from "@tauri-apps/api/event";
 import {
   Columns2,
   Rows2,
@@ -182,6 +183,19 @@ export const LayoutNodeRenderer: React.FC<LayoutNodeRendererProps> = ({ node, cw
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [searchOpen]);
+
+  // Edit ▸ Find / Find Next / Find Previous, while the terminal is on screen.
+  useEffect(() => {
+    const unlisten = listen<string>("menu", ({ payload: id }) => {
+      if (useWorkspaceStore.getState().activeSurface !== "Terminal") return;
+      if (id === "find") setSearchOpen((v) => !v);
+      if (id === "find_next") searchStep(false);
+      if (id === "find_prev") searchStep(true);
+    });
+    return () => {
+      unlisten.then((off) => off());
+    };
+  }, [searchQuery, focusedPane]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Drag-resize divider ────────────────────────────────────────────────────
 

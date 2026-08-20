@@ -8,6 +8,8 @@ import { EditorView } from "./components/EditorView";
 import { CommandPalette } from "./components/CommandPalette";
 import { AgentPanel } from "./components/AgentPanel";
 import { useWorkspaceStore } from "./store";
+import { useGitStore, useGithubStore } from "./githubStore";
+import { listen } from "@tauri-apps/api/event";
 import { safeInvoke, isTauriEnvironment } from "./utils/tauri";
 import { Bot, FolderPlus, Terminal as TermIcon, Plus } from "lucide-react";
 
@@ -16,6 +18,7 @@ export const App: React.FC = () => {
     workspaces,
     currentWorkspaceId,
     activeSurface,
+    setActiveSurface,
     activeTerminalId,
     activeTerminalCwd,
     openTerminal,
@@ -42,50 +45,117 @@ export const App: React.FC = () => {
       .catch(() => {});
   }, [initAppCwd]);
 
-  // Global Keyboard Shortcuts
+  // Cmd/Ctrl+R would hard-reload the webview — ASTER manages its own state.
+  // Every other shortcut lives in the native menu bar (src-tauri/src/menu.rs).
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const isCmdOrCtrl = e.metaKey || e.ctrlKey;
-
-      // Prevent hard browser reload — ASTER manages its own state
-      if (isCmdOrCtrl && e.key.toLowerCase() === "r") {
-        e.preventDefault();
-      } else if (isCmdOrCtrl && e.key.toLowerCase() === "i") {
-        e.preventDefault();
-        setAgentPanelOpen((prev) => !prev);
-      } else if (isCmdOrCtrl && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setCommandPaletteOpen((prev) => !prev);
-      } else if (isCmdOrCtrl && e.key.toLowerCase() === "b") {
-        e.preventDefault();
-        toggleSidebar();
-      } else if (isCmdOrCtrl && e.shiftKey && e.key.toLowerCase() === "d") {
-        e.preventDefault();
-        if (activeTerminalId) splitPane(activeTerminalId, "Horizontal");
-      } else if (isCmdOrCtrl && e.key.toLowerCase() === "d") {
-        e.preventDefault();
-        if (activeTerminalId) splitPane(activeTerminalId, "Vertical");
-      } else if (isCmdOrCtrl && e.key.toLowerCase() === "w") {
-        e.preventDefault();
-        if (activeTerminalId) closePane(activeTerminalId);
-      } else if (isCmdOrCtrl && e.key === "]") {
-        e.preventDefault();
-        focusNextPane();
-      } else if (isCmdOrCtrl && e.key === "[") {
-        e.preventDefault();
-        focusPrevPane();
-      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") e.preventDefault();
     };
-
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeTerminalId, splitPane, closePane, toggleSidebar, focusNextPane, focusPrevPane]);
+  }, []);
 
   // The effective root path for Git and Editor:
   // 1. Use activeTerminalCwd if the terminal has navigated somewhere
   // 2. Fall back to workspace root_path
   const effectiveRootPath =
     activeTerminalCwd || currentWorkspace?.root_path || "";
+
+  // Native menu bar events. File/editor items are handled inside EditorView.
+  useEffect(() => {
+    if (!isTauriEnvironment()) return;
+    const unlisten = listen<string>("menu", async ({ payload: id }) => {
+      switch (id) {
+        case "open_folder": {
+          const path = await safeInvoke<string | null>("open_folder_dialog").catch(() => null);
+          if (path) {
+            createWorkspace("", path);
+            safeInvoke("add_recent_folder", { path }).catch(() => {});
+          }
+          break;
+        }
+        case "clear_recents":
+          safeInvoke("clear_recent_folders").catch(() => {});
+          break;
+        case "new_workspace":
+          createWorkspace("New Workspace");
+          break;
+        case "reveal_in_finder":
+          if (effectiveRootPath) safeInvoke("open_in_finder", { path: effectiveRootPath }).catch(() => {});
+          break;
+        case "toggle_sidebar":
+          toggleSidebar();
+          break;
+        case "surface_terminal":
+          setActiveSurface("Terminal");
+          break;
+        case "surface_editor":
+          setActiveSurface("Editor");
+          break;
+        case "surface_git":
+          setActiveSurface("Git");
+          break;
+        case "surface_logs":
+          setActiveSurface("Logs");
+          break;
+        case "command_palette":
+          setCommandPaletteOpen((prev) => !prev);
+          break;
+        case "agent_panel":
+          setAgentPanelOpen((prev) => !prev);
+          break;
+        case "new_terminal":
+          setActiveSurface("Terminal");
+          openTerminal();
+          break;
+        case "split_vertical":
+          if (activeTerminalId) splitPane(activeTerminalId, "Vertical");
+          break;
+        case "split_horizontal":
+          if (activeTerminalId) splitPane(activeTerminalId, "Horizontal");
+          break;
+        case "close_pane":
+          if (activeTerminalId) closePane(activeTerminalId);
+          break;
+        case "next_pane":
+          focusNextPane();
+          break;
+        case "prev_pane":
+          focusPrevPane();
+          break;
+        case "git_refresh":
+          if (effectiveRootPath) useGitStore.getState().refresh(effectiveRootPath);
+          break;
+        case "git_push":
+          if (effectiveRootPath) useGithubStore.getState().push(effectiveRootPath);
+          break;
+        case "git_pull":
+          if (effectiveRootPath) useGithubStore.getState().pull(effectiveRootPath);
+          break;
+        default:
+          // File ▸ Open Recent entries carry their path in the id.
+          if (id.startsWith("recent:")) {
+            const path = id.slice("recent:".length);
+            createWorkspace("", path);
+            safeInvoke("add_recent_folder", { path }).catch(() => {});
+          }
+      }
+    });
+    return () => {
+      unlisten.then((off) => off());
+    };
+  }, [
+    effectiveRootPath,
+    activeTerminalId,
+    createWorkspace,
+    toggleSidebar,
+    setActiveSurface,
+    openTerminal,
+    splitPane,
+    closePane,
+    focusNextPane,
+    focusPrevPane,
+  ]);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 font-sans select-none overflow-hidden">
@@ -172,10 +242,16 @@ export const App: React.FC = () => {
               {/* ─── Logs Surface ─────────────────────────────────────────────── */}
               {activeSurface === "Logs" && <LogsView />}
 
-              {/* ─── Editor Surface ───────────────────────────────────────────── */}
-              {activeSurface === "Editor" && (
+              {/* ─── Editor Surface ─────────────────────────────────────────────
+                  Kept in DOM like the terminal so open tabs, unsaved edits and
+                  the File menu handlers survive a surface switch.
+              ──────────────────────────────────────────────────────────────── */}
+              <div
+                className="flex-1 min-h-0 min-w-0"
+                style={{ display: activeSurface === "Editor" ? "flex" : "none" }}
+              >
                 <EditorView rootPath={effectiveRootPath} />
-              )}
+              </div>
             </>
           )}
 
