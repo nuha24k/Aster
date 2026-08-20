@@ -343,16 +343,23 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
           if (event.key === "Enter" && event.type === "keydown") {
             const currentItem = suggestionsRef.current[selectedIndexRef.current];
             if (currentItem) applySuggestion(currentItem.value, true);
+            setShowAutocomplete(false);
+            setSuggestions([]);
+            setSelectedIndex(0);
             return false;
           }
           if (event.key === "Escape" && event.type === "keydown") {
             setShowAutocomplete(false);
             setSuggestions([]);
+            setSelectedIndex(0);
             return false;
           }
         }
 
         if (event.key === "Enter" && event.type === "keydown") {
+          setShowAutocomplete(false);
+          setSuggestions([]);
+          setSelectedIndex(0);
           requestAnimationFrame(() => {
             if (!term) return;
             const cursorY = term.buffer.active.cursorY;
@@ -438,6 +445,13 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
           sessionId: ptySessionIdRef.current,
           data,
         }).catch(() => {});
+
+        if (data.includes("\r") || data.includes("\n") || data.includes("\x03") || data.includes("\x1b")) {
+          setShowAutocomplete(false);
+          setSuggestions([]);
+          setSelectedIndex(0);
+          return;
+        }
 
         requestAnimationFrame(() => {
           if (!term) return;

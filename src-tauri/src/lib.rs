@@ -469,6 +469,7 @@ pub fn run() {
             git::git_checkout,
             git::git_status,
             git::git_diff,
+            git::git_file_head,
             git::git_discard,
             git::git_stage,
             git::git_stage_all,
