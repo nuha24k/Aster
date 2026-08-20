@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { useWorkspaceStore } from "../store";
 import Editor, { OnMount } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import { FileItem, EditorTabItem } from "../types";
@@ -54,6 +56,10 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [cursorPosition, setCursorPosition] = useState({ line: 1, col: 1 });
   const [wordWrap, setWordWrap] = useState<"on" | "off">("off");
+  const [autoSave, setAutoSave] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const setActiveSurface = useWorkspaceStore((s) => s.setActiveSurface);
+  const activeSurface = useWorkspaceStore((s) => s.activeSurface);
 
   // Modals state
   const [isQuickOpenOpen, setIsQuickOpenOpen] = useState(false);
@@ -241,8 +247,46 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     }
   };
 
+  // Untitled tabs live under an "untitled:N" pseudo-path until first save.
+  const isUntitled = (path: string) => path.startsWith("untitled:");
+
+  const writeTab = async (tab: EditorTabItem, path: string) => {
+    await invoke("save_file_content", { path, content: tab.content });
+    const name = path.split(/[/\\]/).pop() || path;
+    setTabs((prev) => prev.map((t) => (t.path === tab.path ? { ...t, path, name, isDirty: false } : t)));
+    if (path !== tab.path) {
+      setActiveTabPath(path);
+      loadRoot(currentRoot);
+    }
+  };
+
+  const handleNewFile = () => {
+    const path = `untitled:${Date.now()}`;
+    setTabs((prev) => [...prev, { path, name: "untitled.txt", content: "", isDirty: true }]);
+    setActiveTabPath(path);
+  };
+
+  /** File ▸ New File… — asks for the path up front and creates it on disk. */
+  const handleNewFileOnDisk = async () => {
+    const chosen = await invoke<string | null>("save_file_dialog", { defaultName: "untitled.txt" })
+      .catch(() => null);
+    if (!chosen) return;
+    await invoke("save_file_content", { path: chosen, content: "" }).catch(console.error);
+    loadRoot(currentRoot);
+    const name = chosen.split(/[/\\]/).pop() || chosen;
+    handleOpenFile({ name, path: chosen });
+  };
+
+  const handleOpenFileDialog = async () => {
+    const selected = await invoke<string | null>("open_file_dialog").catch(() => null);
+    if (selected) {
+      const name = selected.split(/[/\\]/).pop() || selected;
+      handleOpenFile({ name, path: selected });
+    }
+  };
+
   // Save active file
-  const handleSaveFile = async () => {
+  const handleSaveFile = async (saveAs = false) => {
     if (!activeTab) return;
     let path = activeTab.path;
     if (saveAs || isUntitled(path)) {
@@ -462,70 +506,12 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [activeTabPath, tabs, closedTabsHistory]);
 
-  // ─── Selection / Edit menu operations on the textarea ─────────────────────
-  const applyEdit = (fn: (s: EditState) => EditState) => {
-    const ta = textareaRef.current;
-    if (!ta || !activeTab) return;
-    const next = fn({
-      value: activeTab.content,
-      selectionStart: ta.selectionStart,
-      selectionEnd: ta.selectionEnd,
-    });
-    if (next.value === activeTab.content) return;
-    handleContentChange(next.value);
-    requestAnimationFrame(() => {
-      ta.focus();
-      ta.setSelectionRange(next.selectionStart, next.selectionEnd);
-    });
-  };
-
-  const findInFile = (backwards = false, query = findQuery) => {
-    const ta = textareaRef.current;
-    if (!ta || !query) return;
-    const hay = ta.value.toLowerCase();
-    const needle = query.toLowerCase();
-    let idx: number;
-    if (backwards) {
-      idx = hay.lastIndexOf(needle, Math.max(ta.selectionStart - 1, 0));
-      if (idx === -1) idx = hay.lastIndexOf(needle);
-    } else {
-      idx = hay.indexOf(needle, ta.selectionEnd);
-      if (idx === -1) idx = hay.indexOf(needle);
-    }
-    if (idx === -1) return;
-    ta.focus();
-    ta.setSelectionRange(idx, idx + query.length);
-  };
-
-  const replaceCurrent = () => {
-    const ta = textareaRef.current;
-    if (!ta || !activeTab || !findQuery) return;
-    const selected = ta.value.slice(ta.selectionStart, ta.selectionEnd);
-    if (selected.toLowerCase() !== findQuery.toLowerCase()) {
-      findInFile();
-      return;
-    }
-    const start = ta.selectionStart;
-    handleContentChange(
-      activeTab.content.slice(0, start) + replaceQuery + activeTab.content.slice(ta.selectionEnd)
-    );
-    requestAnimationFrame(() => {
-      ta.focus();
-      ta.setSelectionRange(start + replaceQuery.length, start + replaceQuery.length);
-      findInFile();
-    });
-  };
-
-  const replaceAll = () => {
-    if (!activeTab || !findQuery) return;
-    handleContentChange(activeTab.content.split(findQuery).join(replaceQuery));
-  };
-
-  const openFind = (withReplace: boolean) => {
-    setActiveSurface("Editor");
-    setFindOpen(true);
-    setReplaceOpen(withReplace);
-    requestAnimationFrame(() => findRef.current?.select());
+  /** Edit/Selection menu items are Monaco's built-in actions. */
+  const runEditorAction = (actionId: string) => {
+    const editor = editorRef.current;
+    if (!editor || activeSurface !== "Editor") return;
+    editor.focus();
+    editor.getAction(actionId)?.run();
   };
 
   // Auto Save (File menu toggle) — debounced, saved files only.
@@ -538,8 +524,8 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
   // Native menu bar items that act on the editor.
   useEffect(() => {
     const unlisten = listen<string>("menu", ({ payload: id }) => {
-      const token = commentToken(activeTab?.name || "");
       switch (id) {
+        // File
         case "save": handleSaveFile(); break;
         case "save_as": handleSaveFile(true); break;
         case "save_all": handleSaveAll(); break;
@@ -548,32 +534,47 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
         case "new_file": setActiveSurface("Editor"); handleNewFile(); break;
         case "new_file_on_disk": setActiveSurface("Editor"); handleNewFileOnDisk(); break;
         case "open_file": setActiveSurface("Editor"); handleOpenFileDialog(); break;
-        case "close_tab": if (activeTabPath) closeTab(activeTabPath); break;
+        case "close_tab": if (activeTabPath) handleCloseTab(activeTabPath); break;
+        case "reopen_tab": handleReopenClosedTab(); break;
         case "close_folder": setCurrentRoot(""); setTree([]); break;
-        case "find_file": setActiveSurface("Editor"); searchRef.current?.focus(); break;
-        // Find/replace is per-surface: the terminal owns it on the Terminal surface.
-        case "find": if (activeSurface === "Editor") openFind(false); break;
-        case "replace": if (activeSurface === "Editor") openFind(true); break;
-        case "find_next": if (activeSurface === "Editor") findInFile(false); break;
-        case "find_prev": if (activeSurface === "Editor") findInFile(true); break;
-        case "toggle_comment": applyEdit((st) => toggleComment(st, token)); break;
-        case "move_line_up": applyEdit((st) => moveLines(st, -1)); break;
-        case "move_line_down": applyEdit((st) => moveLines(st, 1)); break;
-        case "copy_line_up": applyEdit((st) => copyLines(st, -1)); break;
-        case "copy_line_down": applyEdit((st) => copyLines(st, 1)); break;
-        case "duplicate_selection": applyEdit(duplicateSelection); break;
-        case "delete_line": applyEdit(deleteLines); break;
+
+        // Go
+        case "find_file": setActiveSurface("Editor"); setIsQuickOpenOpen(true); break;
+        case "go_to_line": setActiveSurface("Editor"); setIsGoToLineOpen(true); break;
+        case "go_to_symbol": setActiveSurface("Editor"); setIsGoToSymbolOpen(true); break;
+        case "find_in_files": setActiveSurface("Editor"); setIsWorkspaceSearchOpen(true); break;
+        case "editor_commands": setActiveSurface("Editor"); setIsCommandPaletteOpen(true); break;
+
+        // Edit — find/replace is per-surface, the terminal owns it on its own surface.
+        case "find": runEditorAction("actions.find"); break;
+        case "replace": runEditorAction("editor.action.startFindReplaceAction"); break;
+        case "find_next": runEditorAction("editor.action.nextMatchFindAction"); break;
+        case "find_prev": runEditorAction("editor.action.previousMatchFindAction"); break;
+        case "toggle_comment": runEditorAction("editor.action.commentLine"); break;
+        case "toggle_block_comment": runEditorAction("editor.action.blockComment"); break;
+        case "format_document": runEditorAction("editor.action.formatDocument"); break;
+
+        // Selection
+        case "expand_selection": runEditorAction("editor.action.smartSelect.expand"); break;
+        case "shrink_selection": runEditorAction("editor.action.smartSelect.shrink"); break;
+        case "move_line_up": runEditorAction("editor.action.moveLinesUpAction"); break;
+        case "move_line_down": runEditorAction("editor.action.moveLinesDownAction"); break;
+        case "copy_line_up": runEditorAction("editor.action.copyLinesUpAction"); break;
+        case "copy_line_down": runEditorAction("editor.action.copyLinesDownAction"); break;
+        case "duplicate_selection": runEditorAction("editor.action.duplicateSelection"); break;
+        case "delete_line": runEditorAction("editor.action.deleteLines"); break;
+        case "cursor_above": runEditorAction("editor.action.insertCursorAbove"); break;
+        case "cursor_below": runEditorAction("editor.action.insertCursorBelow"); break;
+        case "cursors_line_ends": runEditorAction("editor.action.insertCursorAtEndOfEachLineSelected"); break;
+        case "add_next_occurrence": runEditorAction("editor.action.addSelectionToNextFindMatch"); break;
+        case "add_prev_occurrence": runEditorAction("editor.action.addSelectionToPreviousFindMatch"); break;
+        case "select_all_occurrences": runEditorAction("editor.action.selectHighlights"); break;
       }
     });
     return () => {
       unlisten.then((off) => off());
     };
-  }, [activeTab, tabs, activeTabPath, currentRoot, activeSurface, findQuery, replaceQuery]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleCloseTab = (path: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    closeTab(path);
-  };
+  }, [activeTab, tabs, activeTabPath, currentRoot, activeSurface, closedTabsHistory]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const renderFileIcon = (fileName: string) => {
     const ext = fileName.split(".").pop()?.toLowerCase();
@@ -907,7 +908,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
                   Cmd+Shift+P
                 </button>
                 <button
-                  onClick={handleSaveFile}
+                  onClick={() => handleSaveFile()}
                   disabled={!activeTab.isDirty}
                   className="flex items-center space-x-1 px-2.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-[11px] font-medium transition-colors"
                 >
