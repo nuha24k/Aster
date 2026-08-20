@@ -6,13 +6,18 @@ import "@xterm/xterm/css/xterm.css";
 import { safeInvoke, isTauriEnvironment } from "../utils/tauri";
 import { useWorkspaceStore } from "../store";
 import { useAutocompleteStore } from "../autocompleteStore";
-
+import { History, Command, Terminal as TermIcon, GitBranch, Folder, FileText, CornerDownLeft, X, Search } from "lucide-react";
 
 export interface TerminalHandle {
   findNext: (q: string, incremental?: boolean) => void;
   findPrevious: (q: string) => void;
   clearSearch: () => void;
   focus: () => void;
+}
+
+export interface SuggestionItem {
+  value: string;
+  type: "history" | "command" | "arg" | "file" | "folder" | "branch";
 }
 
 const POPULAR_COMMANDS = [
@@ -28,6 +33,18 @@ const GIT_SUBCOMMANDS = [
 
 const NPM_SUBCOMMANDS = ["run", "install", "test", "build", "start", "init", "publish", "ci"];
 const CARGO_SUBCOMMANDS = ["check", "build", "run", "test", "clippy", "fmt", "init", "new", "doc", "bench"];
+
+function fuzzyMatch(input: string, candidate: string): boolean {
+  if (!input) return true;
+  const q = input.toLowerCase();
+  const c = candidate.toLowerCase();
+  if (c.includes(q)) return true;
+  let qIdx = 0;
+  for (let i = 0; i < c.length && qIdx < q.length; i++) {
+    if (c[i] === q[qIdx]) qIdx++;
+  }
+  return qIdx === q.length;
+}
 
 interface TerminalViewProps {
   id: string;
@@ -45,17 +62,27 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
     const { updateActiveTerminalCwd, activeTerminalId, setActiveTerminal } = useWorkspaceStore();
     const isActiveRef = useRef(false);
 
-    // Autocomplete States
-    const [activeSuggestion, setActiveSuggestion] = useState<string | null>(null);
-    const [ghostText, setGhostText] = useState<string>("");
+    // Interactive Autocomplete States
+    const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
+    const [selectedIndex, setSelectedIndex] = useState(0);
     const [coords, setCoords] = useState<{ left: number; top: number } | null>(null);
     const [showAutocomplete, setShowAutocomplete] = useState(false);
 
+    // Dedicated Ctrl+R History Search Modal
+    const [historySearchOpen, setHistorySearchOpen] = useState(false);
+    const [historySearchQuery, setHistorySearchQuery] = useState("");
+    const [historySearchIndex, setHistorySearchIndex] = useState(0);
+    const historySearchInputRef = useRef<HTMLInputElement>(null);
+
     const showAutocompleteRef = useRef(showAutocomplete);
-    const activeSuggestionRef = useRef(activeSuggestion);
+    const suggestionsRef = useRef(suggestions);
+    const selectedIndexRef = useRef(selectedIndex);
+    const historySearchOpenRef = useRef(historySearchOpen);
 
     useEffect(() => { showAutocompleteRef.current = showAutocomplete; }, [showAutocomplete]);
-    useEffect(() => { activeSuggestionRef.current = activeSuggestion; }, [activeSuggestion]);
+    useEffect(() => { suggestionsRef.current = suggestions; }, [suggestions]);
+    useEffect(() => { selectedIndexRef.current = selectedIndex; }, [selectedIndex]);
+    useEffect(() => { historySearchOpenRef.current = historySearchOpen; }, [historySearchOpen]);
 
     const getCursorCoords = () => {
       if (!terminalRef.current) return null;
@@ -64,12 +91,12 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
       const cursorRect = cursorEl.getBoundingClientRect();
       const containerRect = terminalRef.current.getBoundingClientRect();
       return {
-        left: cursorRect.left - containerRect.left,
-        top: cursorRect.top - containerRect.top, // Align vertically with cursor
+        left: Math.min(cursorRect.left - containerRect.left, Math.max(10, containerRect.width - 340)),
+        top: Math.min(cursorRect.top - containerRect.top + 18, Math.max(10, containerRect.height - 220)),
       };
     };
 
-    const applySuggestion = (suggestionValue: string) => {
+    const applySuggestion = (suggestionValue: string, execute: boolean = false) => {
       if (!xtermRef.current) return;
       const term = xtermRef.current;
       const cursorY = term.buffer.active.cursorY;
@@ -91,21 +118,21 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
       const leadingSpaces = inputCommand.match(/^\s*/)?.[0] || "";
       const actualInput = inputCommand.substring(leadingSpaces.length);
       const backspaces = "\x7f".repeat(actualInput.length);
+      const payload = backspaces + suggestionValue + (execute ? "\r" : "");
 
       safeInvoke("write_terminal", {
         sessionId: ptySessionIdRef.current,
-        data: backspaces + suggestionValue,
+        data: payload,
       }).catch(() => {});
 
-      setActiveSuggestion(null);
-      setGhostText("");
       setShowAutocomplete(false);
+      setSuggestions([]);
+      setSelectedIndex(0);
     };
 
     const generateSuggestions = async (inputCommand: string) => {
       if (!inputCommand || !inputCommand.trim()) {
-        setActiveSuggestion(null);
-        setGhostText("");
+        setSuggestions([]);
         setShowAutocomplete(false);
         return;
       }
@@ -115,17 +142,17 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
       const currentWord = words[words.length - 1] || "";
       const isTypingMainCommand = words.length === 1;
 
-      let list: { value: string; type: "command" | "arg" | "file" | "folder" | "branch" | "history" }[] = [];
+      let list: SuggestionItem[] = [];
 
-      // 1. History
+      // 1. Command History Matches (Highest Priority)
       const history = useAutocompleteStore.getState().history;
       history.forEach((cmd) => {
-        if (cmd.startsWith(inputCommand) && cmd !== inputCommand) {
+        if (fuzzyMatch(inputCommand, cmd) && cmd !== inputCommand) {
           list.push({ value: cmd, type: "history" });
         }
       });
 
-      // 2. Main command
+      // 2. Main Shell Command Matches
       if (isTypingMainCommand) {
         POPULAR_COMMANDS.forEach((cmd) => {
           if (cmd.startsWith(currentWord) && cmd !== currentWord) {
@@ -149,7 +176,7 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
             try {
               const branches = await safeInvoke<{ name: string }[]>("git_branches", { repo: activeCwd });
               branches.forEach((b) => {
-                if (b.name.startsWith(currentWord) && b.name !== currentWord) {
+                if (fuzzyMatch(currentWord, b.name) && b.name !== currentWord) {
                   const prefix = words.slice(0, -1).join(" ");
                   list.push({ value: `${prefix} ${b.name}`, type: "branch" });
                 }
@@ -180,13 +207,13 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
 
         // 4. Filesystem path completion
         const activeCwd = useWorkspaceStore.getState().activeTerminalCwd || cwd || "";
-        if (activeCwd) {
+        if (activeCwd && currentWord) {
           try {
             const files = await safeInvoke<{ name: string; is_dir: boolean }[]>("list_dir_files", {
               path: activeCwd,
             });
             files.forEach((f) => {
-              if (f.name.startsWith(currentWord) && f.name !== currentWord) {
+              if (fuzzyMatch(currentWord, f.name) && f.name !== currentWord) {
                 const prefix = words.slice(0, -1).join(" ");
                 list.push({
                   value: `${prefix} ${f.name}`,
@@ -200,21 +227,18 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
 
       const uniqueList = list.filter(
         (item, index, self) => self.findIndex((t) => t.value === item.value) === index
-      );
+      ).slice(0, 8);
 
-      const bestMatch = uniqueList[0];
-      if (bestMatch && bestMatch.value.toLowerCase().startsWith(inputCommand.toLowerCase())) {
-        const remaining = bestMatch.value.substring(inputCommand.length);
-        setActiveSuggestion(bestMatch.value);
-        setGhostText(remaining);
+      if (uniqueList.length > 0) {
+        setSuggestions(uniqueList);
+        setSelectedIndex(0);
         setShowAutocomplete(true);
         setTimeout(() => {
-          const coords = getCursorCoords();
-          if (coords) setCoords(coords);
+          const c = getCursorCoords();
+          if (c) setCoords(c);
         }, 10);
       } else {
-        setActiveSuggestion(null);
-        setGhostText("");
+        setSuggestions([]);
         setShowAutocomplete(false);
       }
     };
@@ -291,15 +315,39 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
       }
 
       term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
-        if (showAutocompleteRef.current && activeSuggestionRef.current) {
-          if (event.key === "Tab" && event.type === "keydown") {
-            applySuggestion(activeSuggestionRef.current);
-            return false; // prevent default Tab action
+        const isCmdOrCtrl = event.metaKey || event.ctrlKey;
+
+        // Trigger Ctrl+R History Search
+        if (isCmdOrCtrl && event.key.toLowerCase() === "r" && event.type === "keydown") {
+          setHistorySearchOpen((v) => !v);
+          setHistorySearchQuery("");
+          setHistorySearchIndex(0);
+          return false;
+        }
+
+        // Navigation inside interactive Autocomplete Overlay
+        if (showAutocompleteRef.current && suggestionsRef.current.length > 0) {
+          if (event.key === "ArrowDown" && event.type === "keydown") {
+            setSelectedIndex((prev) => (prev + 1) % suggestionsRef.current.length);
+            return false;
+          }
+          if (event.key === "ArrowUp" && event.type === "keydown") {
+            setSelectedIndex((prev) => (prev - 1 + suggestionsRef.current.length) % suggestionsRef.current.length);
+            return false;
+          }
+          if ((event.key === "Tab" || event.key === "ArrowRight") && event.type === "keydown") {
+            const currentItem = suggestionsRef.current[selectedIndexRef.current];
+            if (currentItem) applySuggestion(currentItem.value, false);
+            return false;
+          }
+          if (event.key === "Enter" && event.type === "keydown") {
+            const currentItem = suggestionsRef.current[selectedIndexRef.current];
+            if (currentItem) applySuggestion(currentItem.value, true);
+            return false;
           }
           if (event.key === "Escape" && event.type === "keydown") {
-            setActiveSuggestion(null);
-            setGhostText("");
             setShowAutocomplete(false);
+            setSuggestions([]);
             return false;
           }
         }
@@ -448,31 +496,155 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
       try { xtermRef.current?.focus(); } catch (_) {}
     };
 
+    const renderSuggestionIcon = (type: SuggestionItem["type"]) => {
+      switch (type) {
+        case "history":
+          return <History size={12} className="text-zinc-400 shrink-0" />;
+        case "command":
+          return <Command size={12} className="text-amber-400 shrink-0" />;
+        case "arg":
+          return <TermIcon size={12} className="text-cyan-400 shrink-0" />;
+        case "branch":
+          return <GitBranch size={12} className="text-emerald-400 shrink-0" />;
+        case "folder":
+          return <Folder size={12} className="text-blue-400 shrink-0" />;
+        case "file":
+          return <FileText size={12} className="text-zinc-400 shrink-0" />;
+      }
+    };
+
+    const historyStore = useAutocompleteStore((s) => s.history);
+    const filteredHistory = historyStore.filter((h) => fuzzyMatch(historySearchQuery, h));
+
     return (
       <div
         onClick={handleClick}
-        className="relative w-full h-full bg-[#09090b] overflow-hidden flex flex-col cursor-text"
+        className="relative w-full h-full bg-[#09090b] overflow-hidden flex flex-col cursor-text select-none"
       >
         <div ref={terminalRef} className="w-full flex-1" style={{ minHeight: 0 }} />
 
-        {/* Ghost Text Autocomplete Inline Overlay */}
-        {showAutocomplete && coords && ghostText && (
-          <span
+        {/* Interactive Floating Autocomplete Suggestions Overlay Menu */}
+        {showAutocomplete && coords && suggestions.length > 0 && (
+          <div
             style={{
               position: "absolute",
               left: `${coords.left}px`,
               top: `${coords.top}px`,
-              pointerEvents: "none",
-              fontFamily:
-                "'JetBrainsMono Nerd Font', 'FiraCode Nerd Font', 'Hack Nerd Font', " +
-                "'JetBrains Mono', 'Fira Code', monospace",
-              fontSize: "13px",
-              lineHeight: "1.2",
             }}
-            className="text-zinc-650 select-none opacity-80 whitespace-pre"
+            className="z-40 w-80 bg-zinc-900/95 backdrop-blur-md border border-zinc-700/80 rounded-md shadow-2xl overflow-hidden font-mono text-xs flex flex-col animate-in fade-in zoom-in-95 duration-100"
           >
-            {ghostText}
-          </span>
+            <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-zinc-800 bg-zinc-950/60 text-[10px] text-zinc-400">
+              <span className="font-semibold text-zinc-300">Suggestions</span>
+              <span className="text-[9.5px]">↑↓ navigate · Tab fill · Enter run</span>
+            </div>
+
+            <div className="max-h-48 overflow-y-auto py-1">
+              {suggestions.map((item, idx) => {
+                const isSelected = idx === selectedIndex;
+                return (
+                  <div
+                    key={item.value + idx}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      applySuggestion(item.value, false);
+                    }}
+                    className={`flex items-center justify-between px-2.5 py-1.5 cursor-pointer text-[11.5px] transition-colors ${
+                      isSelected
+                        ? "bg-indigo-600/30 text-indigo-100 border-l-2 border-indigo-500 font-medium"
+                        : "text-zinc-300 hover:bg-zinc-800/80"
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2 truncate">
+                      {renderSuggestionIcon(item.type)}
+                      <span className="truncate">{item.value}</span>
+                    </div>
+
+                    <span className="text-[9px] uppercase px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 shrink-0 font-sans">
+                      {item.type}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Dedicated Ctrl+R History Fuzzy Search Modal Popover */}
+        {historySearchOpen && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-50 w-96 bg-zinc-900 border border-zinc-700/90 rounded-lg shadow-2xl overflow-hidden font-mono text-xs flex flex-col">
+            <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-950">
+              <Search size={13} className="text-indigo-400 shrink-0" />
+              <input
+                ref={historySearchInputRef}
+                type="text"
+                value={historySearchQuery}
+                onChange={(e) => {
+                  setHistorySearchQuery(e.target.value);
+                  setHistorySearchIndex(0);
+                }}
+                placeholder="Fuzzy search command history (Ctrl+R)..."
+                className="flex-1 bg-transparent text-zinc-100 placeholder-zinc-500 outline-none text-xs"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setHistorySearchOpen(false);
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setHistorySearchIndex((prev) => Math.min(prev + 1, filteredHistory.length - 1));
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setHistorySearchIndex((prev) => Math.max(prev - 1, 0));
+                  }
+                  if (e.key === "Enter" && filteredHistory[historySearchIndex]) {
+                    e.preventDefault();
+                    applySuggestion(filteredHistory[historySearchIndex], false);
+                    setHistorySearchOpen(false);
+                  }
+                }}
+              />
+              <button
+                onClick={() => setHistorySearchOpen(false)}
+                className="text-zinc-500 hover:text-zinc-300 p-0.5 rounded"
+              >
+                <X size={13} />
+              </button>
+            </div>
+
+            <div className="max-h-56 overflow-y-auto py-1">
+              {filteredHistory.length === 0 ? (
+                <div className="p-3 text-center text-zinc-500 text-[11px]">No history matches found</div>
+              ) : (
+                filteredHistory.map((cmd, idx) => {
+                  const isSelected = idx === historySearchIndex;
+                  return (
+                    <div
+                      key={cmd + idx}
+                      onClick={() => {
+                        applySuggestion(cmd, false);
+                        setHistorySearchOpen(false);
+                      }}
+                      className={`flex items-center justify-between px-3 py-1.5 cursor-pointer text-xs transition-colors ${
+                        isSelected
+                          ? "bg-indigo-600/30 text-indigo-100 border-l-2 border-indigo-500 font-medium"
+                          : "text-zinc-300 hover:bg-zinc-800"
+                      }`}
+                    >
+                      <div className="flex items-center space-x-2 truncate">
+                        <History size={12} className="text-zinc-500 shrink-0" />
+                        <span className="truncate">{cmd}</span>
+                      </div>
+                      {isSelected && <CornerDownLeft size={11} className="text-indigo-400 shrink-0" />}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="px-3 py-1 border-t border-zinc-800 bg-zinc-950 text-[10px] text-zinc-500 flex justify-between">
+              <span>↑↓ navigate</span>
+              <span>Enter to insert command</span>
+            </div>
+          </div>
         )}
       </div>
     );

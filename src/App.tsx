@@ -124,9 +124,9 @@ export const App: React.FC = () => {
             </div>
           ) : (
             <>
-              {/* ─── Terminal Surface ───────────────────────────────────────────
-                  ALWAYS kept in DOM when layout exists so PTY sessions are
-                  never destroyed on surface switch. Visibility toggled via CSS.
+              {/* ─── Persistent Terminal Layout Renderers per Workspace ────────
+                  All workspace terminal layouts are kept mounted in DOM so 
+                  PTY processes and xterm buffers are never lost on workspace switch.
               ──────────────────────────────────────────────────────────────── */}
               {activeSurface === "Terminal" && !currentWorkspace.layout ? (
                 <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-zinc-900/30 border border-zinc-800/60 rounded-lg m-2">
@@ -151,17 +151,23 @@ export const App: React.FC = () => {
                   </button>
                 </div>
               ) : (
-                currentWorkspace.layout && (
-                  <div
-                    className="relative flex-1 w-full h-full min-h-0 min-w-0"
-                    style={{ display: activeSurface === "Terminal" ? "flex" : "none" }}
-                  >
-                    <LayoutNodeRenderer
-                      node={currentWorkspace.layout}
-                      cwd={currentWorkspace.root_path}
-                    />
-                  </div>
-                )
+                workspaces.map((ws) => {
+                  if (!ws.layout) return null;
+                  const isCurrent = ws.id === currentWorkspaceId;
+                  const isVisible = activeSurface === "Terminal" && isCurrent;
+                  return (
+                    <div
+                      key={ws.id}
+                      className="relative flex-1 w-full h-full min-h-0 min-w-0"
+                      style={{ display: isVisible ? "flex" : "none" }}
+                    >
+                      <LayoutNodeRenderer
+                        node={ws.layout}
+                        cwd={ws.root_path}
+                      />
+                    </div>
+                  );
+                })
               )}
 
               {/* ─── Git Surface ──────────────────────────────────────────────── */}
