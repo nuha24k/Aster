@@ -66,6 +66,7 @@ export interface EditorTabItem {
   name: string;
   content: string;
   isDirty: boolean;
+  language?: string;
 }
 
 export interface AgentTask {

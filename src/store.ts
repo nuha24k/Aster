@@ -132,6 +132,10 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           status: "Idle",
         };
 
+        if (state.currentWorkspaceId !== targetWsId) {
+          set({ currentWorkspaceId: targetWsId });
+        }
+
         if (!ws.layout) {
           const updatedWs: WorkspaceInfo = {
             ...ws,
@@ -141,6 +145,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
             workspaces: s.workspaces.map((w) => (w.id === ws.id ? updatedWs : w)),
             terminals: [...s.terminals, newTerm],
             activeTerminalId: newTermId,
+            currentWorkspaceId: targetWsId,
           }));
         } else {
           const leaves = getLayoutLeaves(ws.layout);
@@ -149,7 +154,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
               ? state.activeTerminalId
               : leaves[0];
           if (targetSurfaceId) {
-            state.splitPane(targetSurfaceId, "Vertical");
+            get().splitPane(targetSurfaceId, "Vertical");
           }
         }
       },

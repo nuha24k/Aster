@@ -1,1 +1,25 @@
 @import "tailwindcss";
+
+/* Monaco Editor Custom Git Gutter Decorations */
+.git-gutter-added {
+  border-left: 3px solid #22c55e !important;
+  margin-left: 3px !important;
+}
+
+.git-gutter-modified {
+  border-left: 3px solid #eab308 !important;
+  margin-left: 3px !important;
+}
+
+.git-gutter-deleted {
+  border-left: 3px solid #ef4444 !important;
+  margin-left: 3px !important;
+}
+
+.git-gutter-glyph-deleted::before {
+  content: "▲";
+  color: #ef4444;
+  font-size: 8px;
+  line-height: 1;
+  margin-left: 2px;
+}

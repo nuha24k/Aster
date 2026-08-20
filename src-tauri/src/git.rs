@@ -322,6 +322,20 @@ pub fn git_diff(repo: String, path: String, staged: bool, untracked: bool) -> Ap
     run_git_str(&repo, &args, &[1])
 }
 
+#[tauri::command]
+pub fn git_file_head(repo: String, path: String) -> AppResult<String> {
+    let repo_path = Path::new(&repo);
+    let target_path = Path::new(&path);
+    let rel_path = if target_path.is_absolute() {
+        target_path.strip_prefix(repo_path).unwrap_or(target_path)
+    } else {
+        target_path
+    };
+    let rel_str = rel_path.to_string_lossy();
+    let spec = format!("HEAD:{}", rel_str);
+    run_git_str(&repo, &["show", &spec], &[])
+}
+
 /// Discards working-tree changes: `git restore` for tracked files,
 /// `git clean -f` (delete) for untracked ones. Destructive — the UI
 /// must confirm explicitly before calling this.
