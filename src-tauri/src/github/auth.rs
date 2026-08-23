@@ -1,0 +1,125 @@
+use serde_json::json;
+use tauri::State;
+use crate::error::{AppError, AppResult};
+use crate::AppState;
+use crate::store;
+use super::client::{api_get, entry_for, http, parse_user, register_account, token_for};
+use super::types::{DeviceCode, GhStatus, GhUser, PollResult};
+
+#[tauri::command]
+pub async fn gh_status(state: State<'_, AppState>) -> Result<GhStatus, AppError> {
+    let (accounts, active) = {
+        let persisted = state.store.lock().unwrap();
+        (persisted.gh_accounts.clone(), persisted.gh_active.clone())
+    };
+    let user = match active.as_deref().and_then(token_for) {
+        Some(token) => api_get(&token, "/user").await.ok().map(|v| parse_user(&v)),
+        None => None,
+    };
+    Ok(GhStatus { user, accounts, active })
+}
+
+#[tauri::command]
+pub async fn gh_set_pat(state: State<'_, AppState>, token: String) -> Result<GhUser, AppError> {
+    let user = api_get(&token, "/user").await?;
+    let parsed = parse_user(&user);
+    register_account(&state, &parsed.login, &token)?;
+    Ok(parsed)
+}
+
+#[tauri::command]
+pub fn gh_switch(state: State<'_, AppState>, login: String) -> AppResult<()> {
+    let mut persisted = state.store.lock().unwrap();
+    if !persisted.gh_accounts.iter().any(|a| a == &login) {
+        return Err(AppError::Pty(format!("unknown account: {login}")));
+    }
+    persisted.gh_active = Some(login);
+    store::save(&persisted)
+}
+
+#[tauri::command]
+pub fn gh_logout(state: State<'_, AppState>, login: Option<String>) -> AppResult<()> {
+    let mut persisted = state.store.lock().unwrap();
+    let Some(target) = login.or_else(|| persisted.gh_active.clone()) else {
+        return Ok(());
+    };
+    if let Ok(entry) = entry_for(&target) {
+        let _ = entry.delete_credential();
+    }
+    persisted.gh_accounts.retain(|a| a != &target);
+    if persisted.gh_active.as_deref() == Some(&target) {
+        persisted.gh_active = persisted.gh_accounts.first().cloned();
+    }
+    store::save(&persisted)
+}
+
+#[tauri::command]
+pub async fn gh_device_start(client_id: String) -> AppResult<DeviceCode> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        device_code: String,
+        user_code: String,
+        verification_uri: String,
+        interval: u64,
+        expires_in: u64,
+    }
+    let resp: Resp = http()
+        .post("https://github.com/login/device/code")
+        .header("Accept", "application/json")
+        .json(&json!({ "client_id": client_id, "scope": "repo" }))
+        .send()
+        .await
+        .map_err(|e| AppError::Pty(format!("github: {e}")))?
+        .json()
+        .await
+        .map_err(|e| AppError::Pty(format!("github device flow: {e}")))?;
+    Ok(DeviceCode {
+        device_code: resp.device_code,
+        user_code: resp.user_code,
+        verification_uri: resp.verification_uri,
+        interval: resp.interval,
+        expires_in: resp.expires_in,
+    })
+}
+
+#[tauri::command]
+pub async fn gh_device_poll(
+    state: State<'_, AppState>,
+    client_id: String,
+    device_code: String,
+) -> Result<PollResult, AppError> {
+    let body: serde_json::Value = http()
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .json(&json!({
+            "client_id": client_id,
+            "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+        }))
+        .send()
+        .await
+        .map_err(|e| AppError::Pty(format!("github: {e}")))?
+        .json()
+        .await
+        .map_err(|e| AppError::Pty(format!("github: {e}")))?;
+
+    if let Some(token) = body["access_token"].as_str() {
+        let user = api_get(token, "/user").await?;
+        let parsed = parse_user(&user);
+        register_account(&state, &parsed.login, token)?;
+        return Ok(PollResult { status: "ok".into(), user: Some(parsed) });
+    }
+    let status = match body["error"].as_str() {
+        Some("authorization_pending") => "pending",
+        Some("slow_down") => "slow_down",
+        Some("expired_token") => "expired",
+        Some("access_denied") => "denied",
+        other => {
+            return Err(AppError::Pty(format!(
+                "github device flow: {}",
+                other.unwrap_or("unknown error")
+            )));
+        }
+    };
+    Ok(PollResult { status: status.into(), user: None })
+}
