@@ -3,6 +3,7 @@ pub mod menu;
 pub mod store;
 pub mod git;
 pub mod github;
+pub mod lsp;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -41,6 +42,12 @@ pub struct FileItemDto {
     pub path: String,
     pub name: String,
     pub is_dir: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileContentDto {
+    pub path: String,
+    pub content: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -226,6 +233,96 @@ fn read_file_content(path: String) -> Result<String, String> {
 #[tauri::command]
 fn save_file_content(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+fn collect_dts_files(dir: &std::path::Path, acc: &mut Vec<FileContentDto>, max_files: usize) {
+    if acc.len() >= max_files || !dir.is_dir() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if acc.len() >= max_files {
+                break;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                let folder_name = path.file_name().unwrap_or_default().to_string_lossy();
+                if folder_name == ".bin" || folder_name == ".cache" || folder_name == "test" || folder_name == "tests" {
+                    continue;
+                }
+                collect_dts_files(&path, acc, max_files);
+            } else if path.is_file() {
+                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                if file_name.ends_with(".d.ts") {
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.len() <= 1_000_000 {
+                            if let Ok(bytes) = std::fs::read(&path) {
+                                acc.push(FileContentDto {
+                                    path: path.to_string_lossy().to_string(),
+                                    content: String::from_utf8_lossy(&bytes).to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_source_files(dir: &std::path::Path, acc: &mut Vec<FileContentDto>, max_files: usize) {
+    if acc.len() >= max_files || !dir.is_dir() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if acc.len() >= max_files {
+                break;
+            }
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if path.is_dir() {
+                if name == "node_modules" || name == "target" || name == ".git" || name == "dist" || name == "build" || name == ".next" {
+                    continue;
+                }
+                collect_source_files(&path, acc, max_files);
+            } else if path.is_file() {
+                if (name.ends_with(".ts") || name.ends_with(".tsx")) && !name.ends_with(".d.ts") {
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.len() <= 500_000 {
+                            if let Ok(bytes) = std::fs::read(&path) {
+                                acc.push(FileContentDto {
+                                    path: path.to_string_lossy().to_string(),
+                                    content: String::from_utf8_lossy(&bytes).to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn get_workspace_type_defs(root_path: String) -> Result<Vec<FileContentDto>, String> {
+    let root = PathBuf::from(&root_path);
+    let mut acc = Vec::new();
+    let node_modules = root.join("node_modules");
+    if node_modules.exists() {
+        collect_dts_files(&node_modules, &mut acc, 1000);
+    }
+    Ok(acc)
+}
+
+#[tauri::command]
+fn get_workspace_source_files(root_path: String) -> Result<Vec<FileContentDto>, String> {
+    let root = PathBuf::from(&root_path);
+    let mut acc = Vec::new();
+    if root.exists() {
+        collect_source_files(&root, &mut acc, 500);
+    }
+    Ok(acc)
 }
 
 /// Return the working directory ASTER was launched from, correcting for src-tauri.
@@ -483,6 +580,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(state)
+        .manage(lsp::LspState::new())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -512,6 +610,8 @@ pub fn run() {
             list_dir_files,
             read_file_content,
             save_file_content,
+            get_workspace_type_defs,
+            get_workspace_source_files,
             get_app_cwd,
             open_folder_dialog,
             open_in_finder,
@@ -520,6 +620,12 @@ pub fn run() {
             save_file_dialog,
             add_recent_folder,
             clear_recent_folders,
+
+            // LSP Commands
+            lsp::lsp_start_server,
+            lsp::lsp_send_request,
+            lsp::lsp_send_notification,
+            lsp::lsp_stop_server,
 
             spawn_agent_task,
             get_agent_tasks,

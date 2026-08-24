@@ -7,27 +7,21 @@ import * as monaco from "monaco-editor";
 import { FileItem, EditorTabItem } from "../types";
 import { isTauriEnvironment } from "../utils/tauri";
 import { computeLineDiff } from "../utils/gitDiff";
+import { configureMonacoTypeScriptForWorkspace } from "../utils/monacoTypeScript";
+import { initLspBridge, lspNotifyOpen, lspNotifyChange, lspNotifySave } from "../utils/monacoLsp";
+import { getLanguageFromPath } from "../utils/editorLanguage";
+import { EditorFileTree, TreeNode } from "./editor/EditorFileTree";
+import { EditorTabBar } from "./editor/EditorTabBar";
+import { EditorStatusBar } from "./editor/EditorStatusBar";
 import { QuickOpenModal } from "./editor/QuickOpenModal";
 import { CommandPaletteModal, CommandItem } from "./editor/CommandPaletteModal";
 import { GoToLineModal } from "./editor/GoToLineModal";
 import { GoToSymbolModal } from "./editor/GoToSymbolModal";
 import { WorkspaceSearchModal } from "./editor/WorkspaceSearchModal";
 import {
-  Folder,
-  FolderOpen,
-  FolderInput,
-  ExternalLink,
-  FileText,
-  FilePlus,
   FileCode,
-  FileJson,
   Save,
-  X,
   Search,
-  ChevronRight,
-  ChevronDown,
-  RefreshCw,
-  File,
   Code2,
   WrapText,
   Hash,
@@ -36,14 +30,6 @@ import {
 
 interface EditorViewProps {
   rootPath: string;
-}
-
-interface TreeNode {
-  name: string;
-  path: string;
-  is_dir: boolean;
-  children?: TreeNode[];
-  loaded?: boolean;
 }
 
 export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
@@ -116,50 +102,6 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     loadRoot(currentRoot);
   }, [currentRoot, loadRoot]);
 
-  // Language mapping
-  const getLanguageFromPath = (filePath: string): string => {
-    const ext = filePath.split(".").pop()?.toLowerCase();
-    switch (ext) {
-      case "ts":
-      case "tsx":
-        return "typescript";
-      case "js":
-      case "jsx":
-        return "javascript";
-      case "json":
-        return "json";
-      case "rs":
-        return "rust";
-      case "py":
-        return "python";
-      case "go":
-        return "go";
-      case "html":
-        return "html";
-      case "css":
-      case "scss":
-        return "css";
-      case "md":
-      case "markdown":
-        return "markdown";
-      case "yaml":
-      case "yml":
-        return "yaml";
-      case "toml":
-        return "toml";
-      case "sql":
-        return "sql";
-      case "sh":
-      case "bash":
-      case "zsh":
-        return "shell";
-      case "xml":
-        return "xml";
-      default:
-        return "plaintext";
-    }
-  };
-
   // Open native OS Folder Dialog
   const handleOpenFolderDialog = async () => {
     if (!isTauriEnvironment()) {
@@ -189,42 +131,46 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     }
   };
 
-  // Toggle folder node
+  // Directory Tree Toggle
   const toggleFolder = async (node: TreeNode) => {
-    const isExpanded = expandedFolders.has(node.path);
-    if (isExpanded) {
-      setExpandedFolders((prev) => {
-        const next = new Set(prev);
-        next.delete(node.path);
-        return next;
-      });
-      return;
+    const next = new Set(expandedFolders);
+    if (next.has(node.path)) {
+      next.delete(node.path);
+      setExpandedFolders(next);
+    } else {
+      next.add(node.path);
+      setExpandedFolders(next);
+      if (!node.loaded) {
+        const children = await loadChildren(node.path);
+        const sorted = [...children].sort((a, b) =>
+          (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0) || a.name.localeCompare(b.name)
+        );
+        setTree((prev) => updateTreeNodeChildren(prev, node.path, sorted));
+      }
     }
-
-    if (node.is_dir && !node.loaded) {
-      const children = await loadChildren(node.path);
-      const sorted = [...children].sort((a, b) =>
-        (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0) || a.name.localeCompare(b.name)
-      );
-      const updateChildren = (nodes: TreeNode[]): TreeNode[] =>
-        nodes.map((n) => {
-          if (n.path === node.path) return { ...n, children: sorted, loaded: true };
-          if (n.children) return { ...n, children: updateChildren(n.children) };
-          return n;
-        });
-      setTree((prev) => updateChildren(prev));
-    }
-
-    setExpandedFolders((prev) => new Set([...prev, node.path]));
   };
 
-  // Open file into tabs
-  const handleOpenFile = async (node: TreeNode | { path: string; name: string }) => {
-    if ("is_dir" in node && node.is_dir) {
-      toggleFolder(node as TreeNode);
-      return;
-    }
+  const updateTreeNodeChildren = (
+    nodes: TreeNode[],
+    targetPath: string,
+    children: TreeNode[]
+  ): TreeNode[] => {
+    return nodes.map((node) => {
+      if (node.path === targetPath) {
+        return { ...node, children, loaded: true };
+      }
+      if (node.is_dir && node.children) {
+        return {
+          ...node,
+          children: updateTreeNodeChildren(node.children, targetPath, children),
+        };
+      }
+      return node;
+    });
+  };
 
+  // Open file in Editor
+  const handleOpenFile = async (node: { name: string; path: string }) => {
     const existing = tabs.find((t) => t.path === node.path);
     if (existing) {
       setActiveTabPath(node.path);
@@ -233,13 +179,16 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
 
     try {
       const content = await invoke<string>("read_file_content", { path: node.path });
+      const language = getLanguageFromPath(node.name);
+
       const newTab: EditorTabItem = {
         path: node.path,
         name: node.name,
         content,
+        language,
         isDirty: false,
-        language: getLanguageFromPath(node.path),
       };
+
       setTabs((prev) => [...prev, newTab]);
       setActiveTabPath(node.path);
     } catch (err) {
@@ -252,6 +201,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
 
   const writeTab = async (tab: EditorTabItem, path: string) => {
     await invoke("save_file_content", { path, content: tab.content });
+    lspNotifySave(path, tab.language).catch(console.error);
     const name = path.split(/[/\\]/).pop() || path;
     setTabs((prev) => prev.map((t) => (t.path === tab.path ? { ...t, path, name, isDirty: false } : t)));
     if (path !== tab.path) {
@@ -299,7 +249,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     await writeTab(activeTab, path).catch(console.error);
   };
 
-  // Untitled tabs are skipped — each would need its own Save As dialog.
+  // Save All
   const handleSaveAll = async () => {
     for (const tab of tabs.filter((t) => t.isDirty && !isUntitled(t.path))) {
       await writeTab(tab, tab.path).catch(console.error);
@@ -381,6 +331,8 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     editorRef.current = editor;
     monacoRef.current = monacoInstance;
 
+    initLspBridge().catch(console.error);
+
     // Define Aster Dark Monaco Theme
     monacoInstance.editor.defineTheme("aster-dark", {
       base: "vs-dark",
@@ -414,10 +366,21 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     });
     monacoInstance.editor.setTheme("aster-dark");
 
+    if (currentRoot) {
+      configureMonacoTypeScriptForWorkspace(currentRoot).catch(console.error);
+    }
+
     editor.onDidChangeCursorPosition((e) => {
       setCursorPosition({ line: e.position.lineNumber, col: e.position.column });
     });
   };
+
+  // Re-configure Monaco TypeScript service when currentRoot workspace changes
+  useEffect(() => {
+    if (currentRoot && monacoRef.current) {
+      configureMonacoTypeScriptForWorkspace(currentRoot).catch(console.error);
+    }
+  }, [currentRoot]);
 
   // Handle active tab change & preserve model state
   useEffect(() => {
@@ -426,7 +389,6 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     const editor = editorRef.current;
     const monacoInst = monacoRef.current;
 
-    // Save previous tab's view state
     if (currentTabPathRef.current && currentTabPathRef.current !== activeTabPath) {
       viewStatesRef.current[currentTabPathRef.current] = editor.saveViewState();
     }
@@ -435,45 +397,46 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     const tab = tabs.find((t) => t.path === activeTabPath);
     if (!tab) return;
 
-    const uri = monacoInst.Uri.file(tab.path);
-    let model = monacoInst.editor.getModel(uri);
-    if (!model) {
-      const lang = getLanguageFromPath(tab.path);
-      model = monacoInst.editor.createModel(tab.content, lang, uri);
-      modelsRef.current[tab.path] = model;
+    let model = modelsRef.current[activeTabPath];
+    if (!model || model.isDisposed()) {
+      const uri = monacoInst.Uri.file(activeTabPath);
+      model = monacoInst.editor.getModel(uri) || monacoInst.editor.createModel(tab.content, tab.language, uri);
+      modelsRef.current[activeTabPath] = model;
     }
 
     if (editor.getModel() !== model) {
       editor.setModel(model);
     }
 
-    // Restore view state
     if (viewStatesRef.current[activeTabPath]) {
       editor.restoreViewState(viewStatesRef.current[activeTabPath]);
     }
 
     editor.focus();
     updateGitDiffDecorations(activeTabPath, model.getValue());
-  }, [activeTabPath, tabs]);
+    lspNotifyOpen(tab.path, tab.language, tab.content, currentRoot).catch(console.error);
+  }, [activeTabPath, tabs, currentRoot]);
 
   // Handle content edits in Monaco
   const handleEditorChange = (value: string | undefined) => {
     if (value === undefined || !activeTabPath) return;
 
+    const tab = tabs.find((t) => t.path === activeTabPath);
+    if (tab) {
+      lspNotifyChange(activeTabPath, tab.language, value, currentRoot).catch(console.error);
+    }
+
     setTabs((prev) =>
-      prev.map((tab) =>
-        tab.path === activeTabPath ? { ...tab, content: value, isDirty: true } : tab
-      )
+      prev.map((t) => (t.path === activeTabPath ? { ...t, content: value, isDirty: true } : t))
     );
 
-    // Debounced Git diff update
     if (diffDebounceRef.current) clearTimeout(diffDebounceRef.current);
     diffDebounceRef.current = setTimeout(() => {
       updateGitDiffDecorations(activeTabPath, value);
     }, 300);
   };
 
-  // Global Keyboard Shortcuts
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isCmdOrCtrl = e.metaKey || e.ctrlKey;
@@ -506,7 +469,6 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [activeTabPath, tabs, closedTabsHistory]);
 
-  /** Edit/Selection menu items are Monaco's built-in actions. */
   const runEditorAction = (actionId: string) => {
     const editor = editorRef.current;
     if (!editor || activeSurface !== "Editor") return;
@@ -514,18 +476,17 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     editor.getAction(actionId)?.run();
   };
 
-  // Auto Save (File menu toggle) — debounced, saved files only.
+  // Auto Save
   useEffect(() => {
     if (!autoSave || !activeTab || !activeTab.isDirty || isUntitled(activeTab.path)) return;
     const t = setTimeout(() => writeTab(activeTab, activeTab.path).catch(console.error), 800);
     return () => clearTimeout(t);
-  }, [autoSave, activeTab?.content, activeTab?.isDirty]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [autoSave, activeTab?.content, activeTab?.isDirty]);
 
-  // Native menu bar items that act on the editor.
+  // Native menu listener
   useEffect(() => {
     const unlisten = listen<string>("menu", ({ payload: id }) => {
       switch (id) {
-        // File
         case "save": handleSaveFile(); break;
         case "save_as": handleSaveFile(true); break;
         case "save_all": handleSaveAll(); break;
@@ -537,15 +498,11 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
         case "close_tab": if (activeTabPath) handleCloseTab(activeTabPath); break;
         case "reopen_tab": handleReopenClosedTab(); break;
         case "close_folder": setCurrentRoot(""); setTree([]); break;
-
-        // Go
         case "find_file": setActiveSurface("Editor"); setIsQuickOpenOpen(true); break;
         case "go_to_line": setActiveSurface("Editor"); setIsGoToLineOpen(true); break;
         case "go_to_symbol": setActiveSurface("Editor"); setIsGoToSymbolOpen(true); break;
         case "find_in_files": setActiveSurface("Editor"); setIsWorkspaceSearchOpen(true); break;
         case "editor_commands": setActiveSurface("Editor"); setIsCommandPaletteOpen(true); break;
-
-        // Edit — find/replace is per-surface, the terminal owns it on its own surface.
         case "find": runEditorAction("actions.find"); break;
         case "replace": runEditorAction("editor.action.startFindReplaceAction"); break;
         case "find_next": runEditorAction("editor.action.nextMatchFindAction"); break;
@@ -553,8 +510,6 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
         case "toggle_comment": runEditorAction("editor.action.commentLine"); break;
         case "toggle_block_comment": runEditorAction("editor.action.blockComment"); break;
         case "format_document": runEditorAction("editor.action.formatDocument"); break;
-
-        // Selection
         case "expand_selection": runEditorAction("editor.action.smartSelect.expand"); break;
         case "shrink_selection": runEditorAction("editor.action.smartSelect.shrink"); break;
         case "move_line_up": runEditorAction("editor.action.moveLinesUpAction"); break;
@@ -574,93 +529,11 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     return () => {
       unlisten.then((off) => off());
     };
-  }, [activeTab, tabs, activeTabPath, currentRoot, activeSurface, closedTabsHistory]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const renderFileIcon = (fileName: string) => {
-    const ext = fileName.split(".").pop()?.toLowerCase();
-    switch (ext) {
-      case "ts":
-      case "tsx":
-        return <FileCode size={14} className="text-blue-400 shrink-0" />;
-      case "js":
-      case "jsx":
-        return <FileCode size={14} className="text-yellow-400 shrink-0" />;
-      case "rs":
-        return <Code2 size={14} className="text-orange-400 shrink-0" />;
-      case "json":
-        return <FileJson size={14} className="text-yellow-500 shrink-0" />;
-      case "md":
-        return <FileText size={14} className="text-sky-300 shrink-0" />;
-      case "html":
-      case "css":
-        return <FileCode size={14} className="text-pink-400 shrink-0" />;
-      default:
-        return <File size={14} className="text-zinc-400 shrink-0" />;
-    }
-  };
-
-  const flattenTree = (nodes: TreeNode[]): TreeNode[] =>
-    nodes.flatMap((n) => [n, ...(n.is_dir && n.children ? flattenTree(n.children) : [])]);
-
-  const searchResults = searchQuery.trim()
-    ? flattenTree(tree).filter(
-        (n) => !n.is_dir && n.name.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : null;
-
-  const renderTreeNode = (node: TreeNode, depth: number = 0) => {
-    const isExpanded = expandedFolders.has(node.path);
-    const isActive = activeTabPath === node.path;
-
-    if (node.is_dir) {
-      return (
-        <div key={node.path} className="select-none">
-          <div
-            onClick={() => toggleFolder(node)}
-            style={{ paddingLeft: `${depth * 12 + 8}px` }}
-            className="flex items-center space-x-1.5 py-1 px-2 rounded hover:bg-zinc-800/70 text-zinc-300 cursor-pointer transition-colors text-xs"
-          >
-            {isExpanded ? (
-              <ChevronDown size={13} className="text-zinc-400 shrink-0" />
-            ) : (
-              <ChevronRight size={13} className="text-zinc-400 shrink-0" />
-            )}
-            {isExpanded ? (
-              <FolderOpen size={14} className="text-indigo-400 shrink-0" />
-            ) : (
-              <Folder size={14} className="text-indigo-400/80 shrink-0" />
-            )}
-            <span className="truncate font-mono text-[11px]">{node.name}</span>
-          </div>
-
-          {isExpanded && node.children && node.children.length > 0 && (
-            <div>{node.children.map((child) => renderTreeNode(child, depth + 1))}</div>
-          )}
-        </div>
-      );
-    }
-
-    return (
-      <div
-        key={node.path}
-        onClick={() => handleOpenFile(node)}
-        style={{ paddingLeft: `${depth * 12 + 20}px` }}
-        className={`flex items-center space-x-1.5 py-1 px-2 rounded text-xs cursor-pointer transition-colors ${
-          isActive
-            ? "bg-indigo-950/70 text-indigo-200 font-medium border-l-2 border-indigo-500"
-            : "hover:bg-zinc-800/50 text-zinc-400 hover:text-zinc-200"
-        }`}
-      >
-        {renderFileIcon(node.name)}
-        <span className="truncate font-mono text-[11px]">{node.name}</span>
-      </div>
-    );
-  };
+  }, [activeTab, tabs, activeTabPath, currentRoot, activeSurface, closedTabsHistory]);
 
   const lineCount = activeTab ? activeTab.content.split("\n").length : 0;
   const rootFolderName = currentRoot.split(/[/\\]/).filter(Boolean).pop() || "Workspace";
 
-  // Commands for Command Palette
   const commandPaletteItems: CommandItem[] = [
     {
       id: "quick_open",
@@ -729,271 +602,111 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
       category: "Editor",
       action: () => editorRef.current?.getAction("editor.unfoldAll")?.run(),
     },
-    {
-      id: "reopen_tab",
-      label: "Reopen Closed Tab",
-      category: "View",
-      shortcut: "Cmd+Shift+T",
-      action: handleReopenClosedTab,
-    },
-    {
-      id: "close_tab",
-      label: "Close Active Tab",
-      category: "View",
-      action: () => activeTabPath && handleCloseTab(activeTabPath),
-    },
   ];
 
   return (
-    <div className="flex h-full w-full bg-zinc-950 text-zinc-200 select-none overflow-hidden font-sans">
-      {/* Sidebar Explorer */}
-      <div className="w-60 bg-zinc-900/80 border-r border-zinc-800 flex flex-col justify-between">
-        <div className="p-2 space-y-2 flex-1 overflow-y-auto">
-          {/* Header */}
-          <div className="flex items-center justify-between px-2 pt-1 pb-1 border-b border-zinc-800/60">
-            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
-              EXPLORER
-            </span>
-            <div className="flex items-center space-x-1">
-              <button
-                onClick={handleNewFile}
-                className="text-zinc-400 hover:text-zinc-100 p-0.5 rounded transition-colors"
-                title="New File (Cmd/Ctrl+N)"
-              >
-                <FilePlus size={13} />
-              </button>
-              <button
-                onClick={handleOpenFolderDialog}
-                className="text-zinc-400 hover:text-zinc-100 p-0.5 rounded transition-colors"
-                title="Open Folder Dialog..."
-              >
-                <FolderInput size={13} />
-              </button>
-              <button
-                onClick={handleOpenInFinder}
-                className="text-zinc-400 hover:text-zinc-100 p-0.5 rounded transition-colors"
-                title="Open in Finder / File Manager"
-              >
-                <ExternalLink size={13} />
-              </button>
-              <button
-                onClick={() => loadRoot(currentRoot)}
-                className="text-zinc-400 hover:text-zinc-100 p-0.5 rounded transition-colors"
-                title="Refresh File Tree"
-              >
-                <RefreshCw size={12} />
-              </button>
-            </div>
-          </div>
+    <div className="flex h-full w-full bg-zinc-950 text-zinc-100 overflow-hidden font-sans select-none">
+      {/* File Explorer Sidebar */}
+      <EditorFileTree
+        currentRoot={currentRoot}
+        rootFolderName={rootFolderName}
+        tree={tree}
+        expandedFolders={expandedFolders}
+        activeTabPath={activeTabPath}
+        searchQuery={searchQuery}
+        searchRef={searchRef}
+        setSearchQuery={setSearchQuery}
+        onToggleFolder={toggleFolder}
+        onOpenFile={handleOpenFile}
+        onNewFile={handleNewFile}
+        onNewFileOnDisk={handleNewFileOnDisk}
+        onOpenFolderDialog={handleOpenFolderDialog}
+        onOpenInFinder={handleOpenInFinder}
+        onRefreshRoot={() => loadRoot(currentRoot)}
+      />
 
-          {/* Root Directory Display */}
-          <div
-            onClick={handleOpenInFinder}
-            className="flex items-center justify-between px-2 py-1 bg-zinc-950/60 rounded border border-zinc-800/80 text-xs cursor-pointer hover:border-zinc-700 transition-colors"
-            title={`Click to open in Finder: ${currentRoot}`}
-          >
-            <div className="flex items-center space-x-1.5 truncate">
-              <FolderOpen size={13} className="text-indigo-400 shrink-0" />
-              <span className="font-mono text-[11px] text-zinc-200 truncate font-semibold">
-                {rootFolderName}
-              </span>
-            </div>
-            <ExternalLink size={11} className="text-zinc-500 hover:text-zinc-300 shrink-0" />
-          </div>
+      {/* Editor & Tabs Container */}
+      <div className="flex-1 flex flex-col min-w-0 bg-zinc-900/30">
+        <EditorTabBar
+          tabs={tabs}
+          activeTabPath={activeTabPath}
+          onTabClick={setActiveTabPath}
+          onTabClose={handleCloseTab}
+          onNewFile={handleNewFile}
+          onOpenFileDialog={handleOpenFileDialog}
+        />
 
-          {/* Search Bar */}
-          <div className="relative px-1">
-            <Search size={12} className="absolute left-3 top-2 text-zinc-500" />
-            <input
-              ref={searchRef}
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Filter explorer..."
-              className="w-full bg-zinc-950 border border-zinc-800 rounded pl-7 pr-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500"
+        {/* Editor Main Content Area */}
+        <div className="flex-1 relative bg-zinc-950">
+          {activeTab ? (
+            <Editor
+              height="100%"
+              theme="aster-dark"
+              language={activeTab.language}
+              value={activeTab.content}
+              onChange={handleEditorChange}
+              onMount={handleEditorMount}
+              options={{
+                fontSize: 13,
+                fontFamily: "JetBrains Mono, Menlo, Monaco, 'Courier New', monospace",
+                fontLigatures: true,
+                minimap: { enabled: true, side: "right" },
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                cursorBlinking: "smooth",
+                cursorSmoothCaretAnimation: "on",
+                smoothScrolling: true,
+                wordWrap: wordWrap,
+                renderLineHighlight: "all",
+                lineNumbersMinChars: 4,
+                padding: { top: 8, bottom: 8 },
+                folding: true,
+                bracketPairColorization: { enabled: true },
+                guides: { bracketPairs: true, indentation: true },
+              }}
             />
-          </div>
-
-          {/* File Tree */}
-          <div className="py-1">
-            {searchResults ? (
-              searchResults.length > 0 ? (
-                searchResults.map((n) => (
-                  <div
-                    key={n.path}
-                    onClick={() => handleOpenFile(n)}
-                    className={`flex items-center space-x-1.5 py-1 px-2 rounded text-xs cursor-pointer transition-colors ${
-                      activeTabPath === n.path
-                        ? "bg-indigo-950/70 text-indigo-200 font-medium border-l-2 border-indigo-500"
-                        : "hover:bg-zinc-800/50 text-zinc-400 hover:text-zinc-200"
-                    }`}
-                  >
-                    {renderFileIcon(n.name)}
-                    <span className="truncate font-mono text-[11px]">{n.name}</span>
-                  </div>
-                ))
-              ) : (
-                <div className="text-[11px] text-zinc-500 px-2 py-2">
-                  No files match "{searchQuery}"
-                </div>
-              )
-            ) : (
-              tree.map((node) => renderTreeNode(node, 0))
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Main Editor Area */}
-      <div className="flex-1 flex flex-col bg-zinc-950 overflow-hidden">
-        {/* Tabs Bar */}
-        <div className="h-9 bg-zinc-900 border-b border-zinc-800 flex items-center px-1 space-x-0.5 overflow-x-auto">
-          {tabs.map((tab) => {
-            const isActive = tab.path === activeTabPath;
-            return (
-              <div
-                key={tab.path}
-                onClick={() => setActiveTabPath(tab.path)}
-                onMouseDown={(e) => {
-                  if (e.button === 1) handleCloseTab(tab.path);
-                }}
-                className={`flex items-center space-x-2 px-3 py-1.5 text-xs cursor-pointer border-t-2 border-r border-zinc-800/80 transition-colors shrink-0 ${
-                  isActive
-                    ? "bg-zinc-950 border-t-indigo-500 text-zinc-100 font-medium"
-                    : "bg-zinc-900/60 border-t-transparent text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
-                }`}
-              >
-                {renderFileIcon(tab.name)}
-                <span className="font-mono text-[11px]">{tab.name}</span>
-                {tab.isDirty ? (
-                  <span className="w-2 h-2 bg-amber-400 rounded-full" title="Unsaved changes" />
-                ) : (
-                  <button
-                    onClick={(e) => handleCloseTab(tab.path, e)}
-                    className="hover:bg-zinc-800 hover:text-rose-400 p-0.5 rounded transition-colors text-zinc-500"
-                  >
-                    <X size={12} />
-                  </button>
-                )}
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-3 bg-zinc-950">
+              <div className="w-12 h-12 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400 shadow-inner">
+                <FileCode size={24} />
               </div>
-            );
-          })}
-        </div>
-
-        {/* Active Tab Content */}
-        {activeTab ? (
-          <div className="flex-1 flex flex-col overflow-hidden">
-            {/* Breadcrumb Header */}
-            <div className="h-7 bg-zinc-900/40 border-b border-zinc-800/80 flex items-center justify-between px-3 text-xs text-zinc-400">
-              <div className="flex items-center space-x-1.5 font-mono text-[11px] text-zinc-400 truncate">
-                <span>{rootFolderName}</span>
-                <span>/</span>
-                <span className="text-zinc-200 font-semibold">
-                  {activeTab.path.replace(currentRoot, "").replace(/^[/\\]/, "")}
-                </span>
+              <div className="text-center space-y-1">
+                <p className="text-sm font-medium text-zinc-300">No File Selected</p>
+                <p className="text-xs text-zinc-500 max-w-sm">
+                  Select a file from the explorer on the left or use keyboard shortcuts to open or search files.
+                </p>
               </div>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 pt-2">
                 <button
                   onClick={() => setIsQuickOpenOpen(true)}
-                  className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 text-[11px] font-mono transition-colors"
-                  title="Quick Open File (Cmd+P)"
+                  className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded text-xs text-zinc-300 transition-colors font-mono"
                 >
-                  Cmd+P
+                  Cmd+P Quick Open
                 </button>
                 <button
-                  onClick={() => setIsCommandPaletteOpen(true)}
-                  className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 text-[11px] font-mono transition-colors"
-                  title="Command Palette (Cmd+Shift+P)"
+                  onClick={handleNewFile}
+                  className="px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 rounded text-xs text-indigo-300 transition-colors font-mono"
                 >
-                  Cmd+Shift+P
-                </button>
-                <button
-                  onClick={() => handleSaveFile()}
-                  disabled={!activeTab.isDirty}
-                  className="flex items-center space-x-1 px-2.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-[11px] font-medium transition-colors"
-                >
-                  <Save size={12} />
-                  <span>{activeTab.isDirty ? "Save" : "Saved"}</span>
+                  + Scratch File
                 </button>
               </div>
             </div>
+          )}
+        </div>
 
-            {/* Monaco Editor Container */}
-            <div className="flex-1 w-full h-full relative">
-              <Editor
-                height="100%"
-                path={activeTab.path}
-                language={getLanguageFromPath(activeTab.path)}
-                theme="aster-dark"
-                value={activeTab.content}
-                onChange={handleEditorChange}
-                onMount={handleEditorMount}
-                options={{
-                  fontSize: 13,
-                  lineHeight: 20,
-                  fontFamily: '"JetBrains Mono", "Fira Code", "Menlo", "Monaco", "Consolas", monospace',
-                  tabSize: 2,
-                  lineNumbers: "on",
-                  glyphMargin: true,
-                  folding: true,
-                  foldingHighlight: true,
-                  bracketPairColorization: { enabled: true },
-                  autoClosingBrackets: "always",
-                  autoClosingQuotes: "always",
-                  formatOnType: true,
-                  formatOnPaste: true,
-                  minimap: { enabled: false },
-                  scrollBeyondLastLine: false,
-                  automaticLayout: true,
-                  renderLineHighlight: "all",
-                  wordWrap: wordWrap,
-                  cursorBlinking: "smooth",
-                  cursorSmoothCaretAnimation: "on",
-                  contextmenu: true,
-                  overviewRulerLanes: 0,
-                  hideCursorInOverviewRuler: true,
-                }}
-              />
-            </div>
-
-            {/* Status Bar */}
-            <div className="h-6 bg-indigo-950/80 border-t border-indigo-900/60 flex items-center justify-between px-3 text-[10px] text-indigo-300 font-mono select-none">
-              <div className="flex items-center space-x-4">
-                <span>Ln {cursorPosition.line}, Col {cursorPosition.col}</span>
-                <span>UTF-8</span>
-                <span className="capitalize">{getLanguageFromPath(activeTab.path)}</span>
-              </div>
-              <div className="flex items-center space-x-3">
-                <span>Lines: {lineCount}</span>
-                {activeTab.isDirty && <span className="text-amber-400 font-semibold">• Modified</span>}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="flex-1 flex flex-col items-center justify-center text-zinc-500 text-xs space-y-3 select-none">
-            <Code2 size={40} className="text-zinc-700" />
-            <div>Select a file from the explorer or press <kbd className="px-1.5 py-0.5 bg-zinc-900 border border-zinc-800 text-zinc-300 rounded font-mono">Cmd + P</kbd> to open</div>
-            <div className="flex items-center space-x-2 pt-2">
-              <button
-                onClick={() => setIsQuickOpenOpen(true)}
-                className="flex items-center space-x-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs transition-colors"
-              >
-                <FileCode size={13} />
-                <span>Quick Open (Cmd+P)</span>
-              </button>
-              <button
-                onClick={handleOpenFolderDialog}
-                className="flex items-center space-x-1.5 px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 rounded text-xs transition-colors"
-              >
-                <FolderInput size={13} />
-                <span>Open Folder...</span>
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Status Bar Footer */}
+        <EditorStatusBar
+          activeTab={activeTab}
+          cursorPosition={cursorPosition}
+          lineCount={lineCount}
+          wordWrap={wordWrap}
+          autoSave={autoSave}
+          onToggleWordWrap={() => setWordWrap((w) => (w === "on" ? "off" : "on"))}
+          onToggleAutoSave={() => setAutoSave((v) => !v)}
+        />
       </div>
 
-      {/* Navigation & Command Modals */}
+      {/* Modals */}
       <QuickOpenModal
         isOpen={isQuickOpenOpen}
         onClose={() => setIsQuickOpenOpen(false)}
@@ -1007,45 +720,49 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
         commands={commandPaletteItems}
       />
 
-      <GoToLineModal
-        isOpen={isGoToLineOpen}
-        onClose={() => setIsGoToLineOpen(false)}
-        maxLines={lineCount || 1}
-        onGoToLine={(line) => {
-          if (editorRef.current) {
-            editorRef.current.setPosition({ lineNumber: line, column: 1 });
-            editorRef.current.revealLineInCenter(line);
-            editorRef.current.focus();
-          }
-        }}
-      />
-
-      <GoToSymbolModal
-        isOpen={isGoToSymbolOpen}
-        onClose={() => setIsGoToSymbolOpen(false)}
-        content={activeTab ? activeTab.content : ""}
-        onSelectSymbol={(line) => {
-          if (editorRef.current) {
-            editorRef.current.setPosition({ lineNumber: line, column: 1 });
-            editorRef.current.revealLineInCenter(line);
-            editorRef.current.focus();
-          }
-        }}
-      />
+      {activeTab && editorRef.current && (
+        <>
+          <GoToLineModal
+            isOpen={isGoToLineOpen}
+            onClose={() => setIsGoToLineOpen(false)}
+            maxLines={lineCount}
+            onGoToLine={(line) => {
+              if (editorRef.current) {
+                editorRef.current.revealLineInCenter(line);
+                editorRef.current.setPosition({ lineNumber: line, column: 1 });
+                editorRef.current.focus();
+              }
+            }}
+          />
+          <GoToSymbolModal
+            isOpen={isGoToSymbolOpen}
+            onClose={() => setIsGoToSymbolOpen(false)}
+            content={activeTab.content}
+            onSelectSymbol={(line) => {
+              if (editorRef.current) {
+                editorRef.current.revealLineInCenter(line);
+                editorRef.current.setPosition({ lineNumber: line, column: 1 });
+                editorRef.current.focus();
+              }
+            }}
+          />
+        </>
+      )}
 
       <WorkspaceSearchModal
         isOpen={isWorkspaceSearchOpen}
         onClose={() => setIsWorkspaceSearchOpen(false)}
         rootPath={currentRoot}
-        onSelectMatch={async (filePath, fileName, line) => {
-          await handleOpenFile({ path: filePath, name: fileName });
-          setTimeout(() => {
-            if (editorRef.current) {
-              editorRef.current.setPosition({ lineNumber: line, column: 1 });
-              editorRef.current.revealLineInCenter(line);
-              editorRef.current.focus();
-            }
-          }, 100);
+        onSelectMatch={(filePath, name, line) => {
+          handleOpenFile({ path: filePath, name }).then(() => {
+            setTimeout(() => {
+              if (editorRef.current) {
+                editorRef.current.revealLineInCenter(line);
+                editorRef.current.setPosition({ lineNumber: line, column: 1 });
+                editorRef.current.focus();
+              }
+            }, 150);
+          });
         }}
       />
     </div>
