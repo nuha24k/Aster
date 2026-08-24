@@ -8,6 +8,7 @@ import {
   Terminal,
   FileCode,
   ScrollText,
+  KanbanSquare,
   Play,
   AlertCircle,
   Sidebar as SidebarIcon,
@@ -353,7 +354,7 @@ export const CockpitBar: React.FC = () => {
 
       {/* Center Area: Surface tab selectors */}
       <nav className="flex items-center space-x-0.5 select-none">
-        {(["Terminal", "Editor", "Git", "Logs"] as const).map((surface) => {
+        {(["Terminal", "Editor", "Git", "Kanban", "Logs"] as const).map((surface) => {
           const isActive = activeSurface === surface;
           const Icon =
             surface === "Terminal"
@@ -362,6 +363,8 @@ export const CockpitBar: React.FC = () => {
               ? FileCode
               : surface === "Git"
               ? GitBranch
+              : surface === "Kanban"
+              ? KanbanSquare
               : ScrollText;
 
           return (

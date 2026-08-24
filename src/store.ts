@@ -5,7 +5,7 @@ import { WorkspaceInfo, TerminalPane, AgentStatus, LayoutNode, SplitDirection, g
 interface WorkspaceStore {
   workspaces: WorkspaceInfo[];
   currentWorkspaceId: string | null;
-  activeSurface: "Terminal" | "Editor" | "Git" | "Logs";
+  activeSurface: "Terminal" | "Editor" | "Git" | "Logs" | "Kanban";
   terminals: TerminalPane[];
   activeTerminalId: string | null;
   /** Current working directory of the active terminal — drives Editor rootPath */
@@ -18,7 +18,7 @@ interface WorkspaceStore {
   setWorkspaces: (workspaces: WorkspaceInfo[]) => void;
   createWorkspace: (name: string, root_path?: string) => void;
   switchWorkspace: (id: string) => void;
-  setActiveSurface: (surface: "Terminal" | "Editor" | "Git" | "Logs") => void;
+  setActiveSurface: (surface: "Terminal" | "Editor" | "Git" | "Logs" | "Kanban") => void;
   openTerminal: (workspaceId?: string) => void;
   addTerminal: (term: TerminalPane) => void;
   setActiveTerminal: (id: string) => void;

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useWorkspaceStore } from "../store";
-import { Search, Terminal, GitBranch, ScrollText, Sidebar as SidebarIcon, X } from "lucide-react";
+import { Search, Terminal, GitBranch, ScrollText, Sidebar as SidebarIcon, KanbanSquare, X } from "lucide-react";
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -25,6 +25,12 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
       label: "Open Git & Diff Cockpit Surface",
       icon: GitBranch,
       action: () => setActiveSurface("Git"),
+    },
+    {
+      id: "kanban",
+      label: "Open Task Board (TASKS.md)",
+      icon: KanbanSquare,
+      action: () => setActiveSurface("Kanban"),
     },
     {
       id: "logs",

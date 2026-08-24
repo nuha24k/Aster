@@ -5,6 +5,7 @@ import { LayoutNodeRenderer } from "./components/LayoutNodeRenderer";
 import { GitView } from "./components/GitView";
 import { LogsView } from "./components/LogsView";
 import { EditorView } from "./components/EditorView";
+import { KanbanView } from "./components/KanbanView";
 import { CommandPalette } from "./components/CommandPalette";
 import { AgentPanel } from "./components/AgentPanel";
 import { useWorkspaceStore } from "./store";
@@ -97,6 +98,9 @@ export const App: React.FC = () => {
           break;
         case "surface_logs":
           setActiveSurface("Logs");
+          break;
+        case "surface_kanban":
+          setActiveSurface("Kanban");
           break;
         case "command_palette":
           setCommandPaletteOpen((prev) => !prev);
@@ -244,6 +248,9 @@ export const App: React.FC = () => {
               {activeSurface === "Git" && (
                 <GitView repoPath={effectiveRootPath} />
               )}
+
+              {/* ─── Task Board Surface ───────────────────────────────────────── */}
+              {activeSurface === "Kanban" && <KanbanView rootPath={effectiveRootPath} />}
 
               {/* ─── Logs Surface ─────────────────────────────────────────────── */}
               {activeSurface === "Logs" && <LogsView />}
