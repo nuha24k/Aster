@@ -274,6 +274,14 @@ impl LspManager {
         }
         Ok(())
     }
+
+    pub async fn stop_all_servers(&self) {
+        let mut guard = self.servers.lock().await;
+        for (_id, server) in guard.drain() {
+            let mut child = server._child.lock().await;
+            let _ = child.kill().await;
+        }
+    }
 }
 
 fn is_command_available(cmd: &str) -> bool {

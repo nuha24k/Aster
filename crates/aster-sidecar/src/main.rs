@@ -716,6 +716,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!("[aster-core] Stdio closed. Shutting down.");
+    state.lsp_manager.stop_all_servers().await;
     Ok(())
 }
 
