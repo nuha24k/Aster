@@ -1,20 +1,20 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GhUser {
     pub login: String,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GhStatus {
     pub user: Option<GhUser>,
     pub accounts: Vec<String>,
     pub active: Option<String>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DeviceCode {
     pub device_code: String,
     pub user_code: String,
@@ -23,19 +23,19 @@ pub struct DeviceCode {
     pub expires_in: u64,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PollResult {
     pub status: String,
     pub user: Option<GhUser>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RemoteInfo {
     pub owner: String,
     pub name: String,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Pr {
     pub number: u64,
     pub title: String,
@@ -49,7 +49,7 @@ pub struct Pr {
     pub created_at: String,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CheckSummary {
     pub total: usize,
     pub passed: usize,
@@ -57,7 +57,7 @@ pub struct CheckSummary {
     pub pending: usize,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TimelineItem {
     pub kind: String,
     pub author: String,
@@ -70,7 +70,7 @@ pub struct TimelineItem {
     pub event: Option<String>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThreadComment {
     pub id: u64,
     pub author: String,
@@ -81,7 +81,7 @@ pub struct ThreadComment {
     pub diff_hunk: Option<String>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReviewThread {
     pub id: String,
     pub resolved: bool,
@@ -91,7 +91,7 @@ pub struct ReviewThread {
     pub comments: Vec<ThreadComment>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CheckRun {
     pub name: String,
     pub status: String,
@@ -99,7 +99,7 @@ pub struct CheckRun {
     pub url: Option<String>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PrFile {
     pub filename: String,
     pub status: String,
@@ -108,7 +108,7 @@ pub struct PrFile {
     pub patch: Option<String>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PrDetail {
     pub number: u64,
     pub title: String,
@@ -132,7 +132,7 @@ pub struct PrDetail {
     pub checks: Vec<CheckRun>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GhIssue {
     pub number: u64,
     pub title: String,
@@ -145,7 +145,7 @@ pub struct GhIssue {
     pub comments: u64,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WorkflowRun {
     pub id: u64,
     pub name: String,
@@ -155,7 +155,7 @@ pub struct WorkflowRun {
     pub html_url: String,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WorkflowJob {
     pub id: u64,
     pub name: String,

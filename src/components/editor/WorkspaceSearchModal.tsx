@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Search, Loader2 } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { safeInvoke } from "../../utils/tauri";
 import { FileItem } from "../../types";
 
 export interface SearchMatch {
@@ -49,7 +49,7 @@ export const WorkspaceSearchModal: React.FC<WorkspaceSearchModalProps> = ({
     try {
       // Scan workspace files
       const collectFiles = async (dir: string): Promise<{ path: string; name: string; relPath: string }[]> => {
-        const items = await invoke<FileItem[]>("list_dir_files", { path: dir });
+        const items = await safeInvoke<FileItem[]>("list_dir_files", { path: dir });
         let result: { path: string; name: string; relPath: string }[] = [];
         for (const item of items) {
           const rel = item.path.replace(rootPath, "").replace(/^[/\\]/, "");
@@ -81,7 +81,7 @@ export const WorkspaceSearchModal: React.FC<WorkspaceSearchModalProps> = ({
         }
 
         try {
-          const content = await invoke<string>("read_file_content", { path: file.path });
+          const content = await safeInvoke<string>("read_file_content", { path: file.path });
           const lines = content.split("\n");
           lines.forEach((line, idx) => {
             if (line.toLowerCase().includes(searchTerm.toLowerCase())) {

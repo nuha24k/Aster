@@ -1,18 +1,9 @@
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Serialize;
-
-use crate::error::{AppError, AppResult};
-
-// ---------------------------------------------------------------------------
-// Cheap branch lookup (no subprocess) for sidebars
-// ---------------------------------------------------------------------------
-
-/// Resolves the `.git` directory for a repo root, following the
-/// `gitdir: <path>` indirection used by worktrees and submodules.
 fn git_dir(repo: &Path) -> Option<PathBuf> {
     let dot_git = repo.join(".git");
     if dot_git.is_dir() {
@@ -27,19 +18,15 @@ fn git_dir(repo: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Reads the current branch straight from `.git/HEAD` — much cheaper
-/// than spawning `git rev-parse` for every sidebar entry.
 pub fn current_branch(repo: &Path) -> Option<String> {
     let head = fs::read_to_string(git_dir(repo)?.join("HEAD")).ok()?;
     let head = head.trim();
     match head.strip_prefix("ref: refs/heads/") {
         Some(branch) => Some(branch.to_string()),
-        // Detached HEAD: show the short hash
         None => Some(head.get(..7).unwrap_or(head).to_string()),
     }
 }
 
-/// Walks up from `path` to find the enclosing git repo root, if any.
 pub fn repo_root(path: &Path) -> Option<PathBuf> {
     let mut current = Some(path);
     while let Some(dir) = current {
@@ -51,25 +38,41 @@ pub fn repo_root(path: &Path) -> Option<PathBuf> {
     None
 }
 
-#[tauri::command]
 pub fn git_branch(path: String) -> Option<String> {
     let root = repo_root(Path::new(&path))?;
     current_branch(&root)
 }
 
-#[tauri::command]
 pub fn git_repo_root(path: String) -> Option<String> {
     repo_root(Path::new(&path)).map(|p| p.to_string_lossy().into_owned())
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct BranchInfo {
     pub name: String,
     pub current: bool,
 }
 
-#[tauri::command]
-pub fn git_branches(repo: String) -> AppResult<Vec<BranchInfo>> {
+fn run_git(repo: &str, args: &[&str], ok_codes: &[i32]) -> Result<Vec<u8>, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    let code = output.status.code().unwrap_or(-1);
+    if code == 0 || ok_codes.contains(&code) {
+        Ok(output.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+fn run_git_str(repo: &str, args: &[&str], ok_codes: &[i32]) -> Result<String, String> {
+    Ok(String::from_utf8_lossy(&run_git(repo, args, ok_codes)?).into_owned())
+}
+
+pub fn git_branches(repo: String) -> Result<Vec<BranchInfo>, String> {
     let out = run_git_str(&repo, &["branch", "--format=%(refname:short)\t%(HEAD)"], &[])?;
     Ok(out
         .lines()
@@ -84,10 +87,7 @@ pub fn git_branches(repo: String) -> AppResult<Vec<BranchInfo>> {
         .collect())
 }
 
-/// Checkout (or create with `-b`) a branch. Surfaces real git errors —
-/// e.g. "would be overwritten by checkout" — verbatim to the UI.
-#[tauri::command]
-pub fn git_checkout(repo: String, branch: String, create: bool) -> AppResult<()> {
+pub fn git_checkout(repo: String, branch: String, create: bool) -> Result<(), String> {
     let mut args = vec!["checkout"];
     if create {
         args.push("-b");
@@ -96,49 +96,17 @@ pub fn git_checkout(repo: String, branch: String, create: bool) -> AppResult<()>
     run_git(&repo, &args, &[]).map(|_| ())
 }
 
-// ---------------------------------------------------------------------------
-// git CLI plumbing
-// ---------------------------------------------------------------------------
-
-/// Runs git in `repo`. `ok_codes` lists exit codes that are not errors
-/// (e.g. `git diff` exits 1 when differences exist).
-fn run_git(repo: &str, args: &[&str], ok_codes: &[i32]) -> AppResult<Vec<u8>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .map_err(|e| AppError::Pty(format!("failed to run git: {e}")))?;
-    let code = output.status.code().unwrap_or(-1);
-    if code == 0 || ok_codes.contains(&code) {
-        Ok(output.stdout)
-    } else {
-        Err(AppError::Pty(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ))
-    }
-}
-
-fn run_git_str(repo: &str, args: &[&str], ok_codes: &[i32]) -> AppResult<String> {
-    Ok(String::from_utf8_lossy(&run_git(repo, args, ok_codes)?).into_owned())
-}
-
-// ---------------------------------------------------------------------------
-// Status (porcelain v2)
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct FileChange {
     pub path: String,
     pub orig_path: Option<String>,
-    /// Single status letter for the UI badge: M, A, D, R, C, U (untracked), ! (conflict)
     pub status: String,
     pub staged: bool,
     pub added: Option<u32>,
     pub removed: Option<u32>,
 }
 
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone, Default, Debug)]
 pub struct GitStatus {
     pub branch: Option<String>,
     pub oid: Option<String>,
@@ -149,8 +117,6 @@ pub struct GitStatus {
     pub conflicts: Vec<String>,
 }
 
-/// Parses `git diff --numstat -z` output into path -> (added, removed).
-/// Binary files report "-" and map to None.
 fn numstat(repo: &str, staged: bool) -> HashMap<String, (Option<u32>, Option<u32>)> {
     let mut args = vec!["diff", "--numstat", "-z"];
     if staged {
@@ -196,8 +162,7 @@ fn count_lines(repo: &str, rel_path: &str) -> Option<u32> {
     Some(content.iter().filter(|&&b| b == b'\n').count() as u32)
 }
 
-#[tauri::command]
-pub fn git_status(repo: String) -> AppResult<GitStatus> {
+pub fn git_status(repo: String) -> Result<GitStatus, String> {
     let out = run_git(&repo, &["status", "--porcelain=v2", "--branch", "-z"], &[])?;
     let out = String::from_utf8_lossy(&out);
 
@@ -301,12 +266,7 @@ pub fn git_status(repo: String) -> AppResult<GitStatus> {
     Ok(status)
 }
 
-// ---------------------------------------------------------------------------
-// Diff / stage / commit / log
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub fn git_diff(repo: String, path: String, staged: bool, untracked: bool) -> AppResult<String> {
+pub fn git_diff(repo: String, path: String, staged: bool, untracked: bool) -> Result<String, String> {
     if untracked {
         return run_git_str(
             &repo,
@@ -322,8 +282,7 @@ pub fn git_diff(repo: String, path: String, staged: bool, untracked: bool) -> Ap
     run_git_str(&repo, &args, &[1])
 }
 
-#[tauri::command]
-pub fn git_file_head(repo: String, path: String) -> AppResult<String> {
+pub fn git_file_head(repo: String, path: String) -> Result<String, String> {
     let repo_path = Path::new(&repo);
     let target_path = Path::new(&path);
     let rel_path = if target_path.is_absolute() {
@@ -336,11 +295,7 @@ pub fn git_file_head(repo: String, path: String) -> AppResult<String> {
     run_git_str(&repo, &["show", &spec], &[])
 }
 
-/// Discards working-tree changes: `git restore` for tracked files,
-/// `git clean -f` (delete) for untracked ones. Destructive — the UI
-/// must confirm explicitly before calling this.
-#[tauri::command]
-pub fn git_discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -> AppResult<()> {
+pub fn git_discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -> Result<(), String> {
     if !tracked.is_empty() {
         let mut args = vec!["restore", "--"];
         args.extend(tracked.iter().map(String::as_str));
@@ -354,36 +309,32 @@ pub fn git_discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -
     Ok(())
 }
 
-#[tauri::command]
-pub fn git_stage(repo: String, paths: Vec<String>) -> AppResult<()> {
+pub fn git_stage(repo: String, paths: Vec<String>) -> Result<(), String> {
     let mut args = vec!["add", "--"];
     args.extend(paths.iter().map(String::as_str));
     run_git(&repo, &args, &[]).map(|_| ())
 }
 
-#[tauri::command]
-pub fn git_stage_all(repo: String) -> AppResult<()> {
+pub fn git_stage_all(repo: String) -> Result<(), String> {
     run_git(&repo, &["add", "-A"], &[]).map(|_| ())
 }
 
-#[tauri::command]
-pub fn git_unstage(repo: String, paths: Vec<String>) -> AppResult<()> {
+pub fn git_unstage(repo: String, paths: Vec<String>) -> Result<(), String> {
     let mut args = vec!["restore", "--staged", "--"];
     args.extend(paths.iter().map(String::as_str));
     run_git(&repo, &args, &[]).map(|_| ())
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct CommitResult {
     pub hash: String,
 }
 
-#[tauri::command]
 pub fn git_commit(
     repo: String,
     summary: String,
     description: Option<String>,
-) -> AppResult<CommitResult> {
+) -> Result<CommitResult, String> {
     let mut args = vec!["commit", "-m", summary.as_str()];
     let desc = description.unwrap_or_default();
     if !desc.trim().is_empty() {
@@ -396,7 +347,7 @@ pub fn git_commit(
     })
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct Commit {
     pub hash: String,
     pub short_hash: String,
@@ -405,9 +356,6 @@ pub struct Commit {
     pub subject: String,
 }
 
-/// Reads `.github/pull_request_template.md` (or `PULL_REQUEST_TEMPLATE.md`
-/// at the repo root) if present.
-#[tauri::command]
 pub fn git_pr_template(repo: String) -> Option<String> {
     let candidates = [
         ".github/pull_request_template.md",
@@ -424,8 +372,7 @@ pub fn git_pr_template(repo: String) -> Option<String> {
     None
 }
 
-#[tauri::command]
-pub fn git_log(repo: String, limit: u32) -> AppResult<Vec<Commit>> {
+pub fn git_log(repo: String, limit: u32) -> Result<Vec<Commit>, String> {
     let n = limit.to_string();
     let out = run_git_str(
         &repo,
@@ -448,11 +395,7 @@ pub fn git_log(repo: String, limit: u32) -> AppResult<Vec<Commit>> {
         .collect())
 }
 
-// ---------------------------------------------------------------------------
-// Stash management
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct StashEntry {
     pub index: u32,
     pub message: String,
@@ -460,8 +403,7 @@ pub struct StashEntry {
     pub date: String,
 }
 
-#[tauri::command]
-pub fn git_stash_list(repo: String) -> AppResult<Vec<StashEntry>> {
+pub fn git_stash_list(repo: String) -> Result<Vec<StashEntry>, String> {
     let out = run_git_str(
         &repo,
         &["stash", "list", "--format=%gd\x1f%gs\x1f%ai\x1e"],
@@ -503,8 +445,7 @@ pub fn git_stash_list(repo: String) -> AppResult<Vec<StashEntry>> {
         .collect())
 }
 
-#[tauri::command]
-pub fn git_stash_push(repo: String, message: Option<String>) -> AppResult<()> {
+pub fn git_stash_push(repo: String, message: Option<String>) -> Result<(), String> {
     if let Some(ref m) = message {
         if !m.trim().is_empty() {
             return run_git(&repo, &["stash", "push", "-m", m.as_str()], &[]).map(|_| ());
@@ -513,28 +454,21 @@ pub fn git_stash_push(repo: String, message: Option<String>) -> AppResult<()> {
     run_git(&repo, &["stash", "push"], &[]).map(|_| ())
 }
 
-#[tauri::command]
-pub fn git_stash_apply(repo: String, index: u32) -> AppResult<()> {
+pub fn git_stash_apply(repo: String, index: u32) -> Result<(), String> {
     let selector = format!("stash@{{{index}}}");
     run_git(&repo, &["stash", "apply", &selector], &[]).map(|_| ())
 }
 
-#[tauri::command]
-pub fn git_stash_drop(repo: String, index: u32) -> AppResult<()> {
+pub fn git_stash_drop(repo: String, index: u32) -> Result<(), String> {
     let selector = format!("stash@{{{index}}}");
     run_git(&repo, &["stash", "drop", &selector], &[]).map(|_| ())
 }
 
-// ---------------------------------------------------------------------------
-// Amend last commit
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
 pub fn git_commit_amend(
     repo: String,
     summary: String,
     description: Option<String>,
-) -> AppResult<CommitResult> {
+) -> Result<CommitResult, String> {
     let mut args = vec!["commit", "--amend", "-m", summary.as_str()];
     let desc = description.unwrap_or_default();
     if !desc.trim().is_empty() {
@@ -545,20 +479,11 @@ pub fn git_commit_amend(
     Ok(CommitResult { hash: hash.trim().to_string() })
 }
 
-// ---------------------------------------------------------------------------
-// Cherry-pick
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub fn git_cherry_pick(repo: String, hash: String) -> AppResult<()> {
+pub fn git_cherry_pick(repo: String, hash: String) -> Result<(), String> {
     run_git(&repo, &["cherry-pick", &hash], &[]).map(|_| ())
 }
 
-// ---------------------------------------------------------------------------
-// Blame
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct BlameLine {
     pub line: u32,
     pub hash: String,
@@ -568,8 +493,7 @@ pub struct BlameLine {
     pub summary: String,
 }
 
-#[tauri::command]
-pub fn git_blame(repo: String, path: String) -> AppResult<Vec<BlameLine>> {
+pub fn git_blame(repo: String, path: String) -> Result<Vec<BlameLine>, String> {
     let out = run_git(&repo, &["blame", "--line-porcelain", "--", &path], &[])?;
     let text = String::from_utf8_lossy(&out);
 
@@ -612,12 +536,7 @@ pub fn git_blame(repo: String, path: String) -> AppResult<Vec<BlameLine>> {
     Ok(result)
 }
 
-// ---------------------------------------------------------------------------
-// Per-hunk staging via git apply --cached
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub fn git_stage_hunk(repo: String, patch: String) -> AppResult<()> {
+pub fn git_stage_hunk(repo: String, patch: String) -> Result<(), String> {
     use std::io::Write;
     let mut child = Command::new("git")
         .arg("-C")
@@ -626,31 +545,24 @@ pub fn git_stage_hunk(repo: String, patch: String) -> AppResult<()> {
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| AppError::Pty(format!("git apply: {e}")))?;
+        .map_err(|e| format!("git apply: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(patch.as_bytes());
     }
     let out = child
         .wait_with_output()
-        .map_err(|e| AppError::Pty(format!("git apply wait: {e}")))?;
+        .map_err(|e| format!("git apply wait: {e}"))?;
     if !out.status.success() {
-        return Err(AppError::Pty(
-            String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        ));
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Conflict resolution: accept ours/theirs then stage
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub fn git_conflict_resolve(repo: String, path: String, resolution: String) -> AppResult<()> {
+pub fn git_conflict_resolve(repo: String, path: String, resolution: String) -> Result<(), String> {
     let side = match resolution.as_str() {
         "ours" => "--ours",
         "theirs" => "--theirs",
-        other => return Err(AppError::Pty(format!("unknown resolution: {other}"))),
+        other => return Err(format!("unknown resolution: {other}")),
     };
     run_git(&repo, &["checkout", side, "--", &path], &[]).map(|_| ())?;
     run_git(&repo, &["add", "--", &path], &[]).map(|_| ())

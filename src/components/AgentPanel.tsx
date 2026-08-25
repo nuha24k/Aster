@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { safeInvoke } from "../utils/tauri";
 import { AgentTask } from "../types";
 import { Bot, Play, CheckCircle2, RefreshCw, Sparkles, X } from "lucide-react";
 
@@ -17,7 +17,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ isOpen, onClose, rootPat
 
   const fetchTasks = async () => {
     try {
-      const res = await invoke<AgentTask[]>("get_agent_tasks");
+      const res = await safeInvoke<AgentTask[]>("get_agent_tasks");
       setTasks(res);
     } catch (err) {
       console.error(err);
@@ -36,7 +36,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ isOpen, onClose, rootPat
 
     setLoading(true);
     try {
-      await invoke("spawn_agent_task", { name: taskName.trim(), prompt: prompt.trim(), rootPath });
+      await safeInvoke("spawn_agent_task", { name: taskName.trim(), prompt: prompt.trim(), rootPath });
       setTaskName("");
       setPrompt("");
       setTimeout(fetchTasks, 400);

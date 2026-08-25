@@ -9,8 +9,8 @@ import { CommandPalette } from "./components/CommandPalette";
 import { AgentPanel } from "./components/AgentPanel";
 import { useWorkspaceStore } from "./store";
 import { useGitStore, useGithubStore } from "./githubStore";
-import { listen } from "@tauri-apps/api/event";
-import { safeInvoke, isTauriEnvironment } from "./utils/tauri";
+import { subscribeMenu, isDesktopEnvironment } from "./api/client";
+import { safeInvoke } from "./utils/tauri";
 import { Bot, FolderPlus, Terminal as TermIcon, Plus } from "lucide-react";
 
 export const App: React.FC = () => {
@@ -37,16 +37,17 @@ export const App: React.FC = () => {
 
   // On first mount: fetch the real project root from Rust so app default CWD is known.
   useEffect(() => {
-    if (!isTauriEnvironment()) return;
-    safeInvoke<string>("get_app_cwd")
-      .then((cwd) => {
-        if (cwd) initAppCwd(cwd);
+    if (!isDesktopEnvironment()) return;
+    safeInvoke<any>("get_app_cwd")
+      .then((res) => {
+        const cwd = typeof res === "string" ? res : res?.cwd;
+        if (cwd && typeof cwd === "string") initAppCwd(cwd);
       })
       .catch(() => {});
   }, [initAppCwd]);
 
   // Cmd/Ctrl+R would hard-reload the webview — ASTER manages its own state.
-  // Every other shortcut lives in the native menu bar (src-tauri/src/menu.rs).
+  // Every other shortcut lives in the native menu bar.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") e.preventDefault();
@@ -58,13 +59,18 @@ export const App: React.FC = () => {
   // The effective root path for Git and Editor:
   // 1. Use activeTerminalCwd if the terminal has navigated somewhere
   // 2. Fall back to workspace root_path
-  const effectiveRootPath =
-    activeTerminalCwd || currentWorkspace?.root_path || "";
+  const rawRootPath =
+    typeof activeTerminalCwd === "string" && activeTerminalCwd
+      ? activeTerminalCwd
+      : typeof currentWorkspace?.root_path === "string"
+      ? currentWorkspace.root_path
+      : "";
+  const effectiveRootPath = typeof rawRootPath === "string" ? rawRootPath : "";
 
   // Native menu bar events. File/editor items are handled inside EditorView.
   useEffect(() => {
-    if (!isTauriEnvironment()) return;
-    const unlisten = listen<string>("menu", async ({ payload: id }) => {
+    if (!isDesktopEnvironment()) return;
+    const unsubscribe = subscribeMenu(async (id) => {
       switch (id) {
         case "open_folder": {
           const path = await safeInvoke<string | null>("open_folder_dialog").catch(() => null);
@@ -142,7 +148,7 @@ export const App: React.FC = () => {
       }
     });
     return () => {
-      unlisten.then((off) => off());
+      unsubscribe();
     };
   }, [
     effectiveRootPath,
@@ -175,7 +181,7 @@ export const App: React.FC = () => {
               </p>
               <button
                 onClick={async () => {
-                  if (isTauriEnvironment()) {
+                  if (isDesktopEnvironment()) {
                     try {
                       const path = await safeInvoke<string | null>("open_folder_dialog");
                       if (path) {

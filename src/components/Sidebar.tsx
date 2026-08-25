@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { useWorkspaceStore } from "../store";
 import { AgentStatus, getLayoutLeaves } from "../types";
-import { safeInvoke, isTauriEnvironment } from "../utils/tauri";
+import { safeInvoke, isDesktopEnvironment } from "../utils/tauri";
 import {
   Folder,
   Terminal as TermIcon,
@@ -48,7 +48,7 @@ export const Sidebar: React.FC = () => {
   };
 
   const handleBrowseFolder = async () => {
-    if (!isTauriEnvironment()) return;
+    if (!isDesktopEnvironment()) return;
     try {
       const selectedPath = await safeInvoke<string | null>("open_folder_dialog");
       if (selectedPath) {
@@ -134,7 +134,7 @@ export const Sidebar: React.FC = () => {
                 placeholder="Absolute path (optional)..."
                 className="flex-1 bg-zinc-900 border border-zinc-700/80 rounded px-2 py-1 text-[11px] font-mono text-zinc-300 focus:outline-none focus:border-indigo-500"
               />
-              {isTauriEnvironment() && (
+              {isDesktopEnvironment() && (
                 <button
                   type="button"
                   onClick={handleBrowseFolder}
@@ -208,7 +208,7 @@ export const Sidebar: React.FC = () => {
                         <span className="truncate font-semibold text-[11.5px] leading-snug">
                           {ws.name}
                         </span>
-                        {ws.root_path && (
+                        {typeof ws.root_path === "string" && ws.root_path && (
                           <span className="text-[9.5px] text-zinc-500 font-mono truncate">
                             {ws.root_path.split(/[/\\]/).slice(-2).join("/")}
                           </span>

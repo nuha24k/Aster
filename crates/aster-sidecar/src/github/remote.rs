@@ -1,6 +1,5 @@
-use std::process::Command;
-use crate::error::{AppError, AppResult};
 use super::types::RemoteInfo;
+use std::process::Command;
 
 fn parse_github_remote(url: &str) -> Option<RemoteInfo> {
     let rest = url
@@ -16,40 +15,35 @@ fn parse_github_remote(url: &str) -> Option<RemoteInfo> {
     })
 }
 
-fn run_git(repo: &str, args: &[&str]) -> AppResult<String> {
+fn run_git(repo: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(args)
         .output()
-        .map_err(|e| AppError::Pty(format!("failed to run git: {e}")))?;
+        .map_err(|e| format!("failed to run git: {e}"))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
-        Err(AppError::Pty(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ))
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 
-#[tauri::command]
 pub fn gh_remote_info(repo: String) -> Option<RemoteInfo> {
     let url = run_git(&repo, &["remote", "get-url", "origin"]).ok()?;
     parse_github_remote(&url)
 }
 
-#[tauri::command]
-pub async fn gh_push(repo: String) -> AppResult<()> {
-    tauri::async_runtime::spawn_blocking(move || {
+pub async fn gh_push(repo: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
         run_git(&repo, &["push", "-u", "origin", "HEAD"]).map(|_| ())
     })
     .await
-    .map_err(|e| AppError::Pty(e.to_string()))?
+    .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub async fn gh_pull(repo: String) -> AppResult<()> {
-    tauri::async_runtime::spawn_blocking(move || run_git(&repo, &["pull"]).map(|_| ()))
+pub async fn gh_pull(repo: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || run_git(&repo, &["pull"]).map(|_| ()))
         .await
-        .map_err(|e| AppError::Pty(e.to_string()))?
+        .map_err(|e| e.to_string())?
 }

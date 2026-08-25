@@ -1,9 +1,8 @@
-use std::sync::OnceLock;
-use serde_json::json;
-use crate::error::{AppError, AppResult};
-use crate::AppState;
-use crate::store;
 use super::types::GhUser;
+use crate::state::ServerState;
+use crate::store;
+use serde_json::json;
+use std::sync::OnceLock;
 
 pub const KEYRING_SERVICE: &str = "dev.aster.app";
 pub const API: &str = "https://api.github.com";
@@ -18,32 +17,32 @@ pub fn http() -> &'static reqwest::Client {
     })
 }
 
-pub fn entry_for(login: &str) -> AppResult<keyring::Entry> {
+pub fn entry_for(login: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYRING_SERVICE, &format!("github-token:{login}"))
-        .map_err(|e| AppError::Pty(format!("keychain: {e}")))
+        .map_err(|e| format!("keychain: {e}"))
 }
 
 pub fn token_for(login: &str) -> Option<String> {
     entry_for(login).ok()?.get_password().ok()
 }
 
-pub fn active_login(state: &AppState) -> Option<String> {
-    state.store.lock().unwrap().gh_active.clone()
+pub fn active_login(state: &ServerState) -> Option<String> {
+    state.store.lock().ok()?.gh_active.clone()
 }
 
-pub fn load_token(state: &AppState) -> Option<String> {
+pub fn load_token(state: &ServerState) -> Option<String> {
     token_for(&active_login(state)?)
 }
 
-pub fn require_token(state: &AppState) -> AppResult<String> {
-    load_token(state).ok_or_else(|| AppError::Pty("not connected to GitHub".into()))
+pub fn require_token(state: &ServerState) -> Result<String, String> {
+    load_token(state).ok_or_else(|| "not connected to GitHub".into())
 }
 
-pub fn register_account(state: &AppState, login: &str, token: &str) -> AppResult<()> {
+pub fn register_account(state: &ServerState, login: &str, token: &str) -> Result<(), String> {
     entry_for(login)?
         .set_password(token)
-        .map_err(|e| AppError::Pty(format!("keychain: {e}")))?;
-    let mut persisted = state.store.lock().unwrap();
+        .map_err(|e| format!("keychain: {e}"))?;
+    let mut persisted = state.store.lock().map_err(|e| e.to_string())?;
     if !persisted.gh_accounts.iter().any(|a| a == login) {
         persisted.gh_accounts.push(login.to_string());
     }
@@ -59,27 +58,27 @@ pub fn parse_user(v: &serde_json::Value) -> GhUser {
     }
 }
 
-pub async fn api_get(token: &str, path: &str) -> AppResult<serde_json::Value> {
+pub async fn api_get(token: &str, path: &str) -> Result<serde_json::Value, String> {
     let resp = http()
         .get(format!("{API}{path}"))
         .bearer_auth(token)
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .map_err(|e| AppError::Pty(format!("github: {e}")))?;
+        .map_err(|e| format!("github: {e}"))?;
     let status = resp.status();
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| AppError::Pty(format!("github: {e}")))?;
+        .map_err(|e| format!("github: {e}"))?;
     if !status.is_success() {
         let msg = body["message"].as_str().unwrap_or("request failed");
-        return Err(AppError::Pty(format!("github ({status}): {msg}")));
+        return Err(format!("github ({status}): {msg}"));
     }
     Ok(body)
 }
 
-pub async fn api_post(token: &str, path: &str, payload: serde_json::Value) -> AppResult<serde_json::Value> {
+pub async fn api_post(token: &str, path: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
     let resp = http()
         .post(format!("{API}{path}"))
         .bearer_auth(token)
@@ -87,12 +86,12 @@ pub async fn api_post(token: &str, path: &str, payload: serde_json::Value) -> Ap
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::Pty(format!("github: {e}")))?;
+        .map_err(|e| format!("github: {e}"))?;
     let status = resp.status();
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| AppError::Pty(format!("github: {e}")))?;
+        .map_err(|e| format!("github: {e}"))?;
     if !status.is_success() {
         let mut msg = body["message"].as_str().unwrap_or("request failed").to_string();
         if let Some(errors) = body["errors"].as_array() {
@@ -102,12 +101,12 @@ pub async fn api_post(token: &str, path: &str, payload: serde_json::Value) -> Ap
                 }
             }
         }
-        return Err(AppError::Pty(format!("github ({status}): {msg}")));
+        return Err(format!("github ({status}): {msg}"));
     }
     Ok(body)
 }
 
-pub async fn api_put(token: &str, path: &str, payload: serde_json::Value) -> AppResult<serde_json::Value> {
+pub async fn api_put(token: &str, path: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
     let resp = http()
         .put(format!("{API}{path}"))
         .bearer_auth(token)
@@ -115,20 +114,20 @@ pub async fn api_put(token: &str, path: &str, payload: serde_json::Value) -> App
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::Pty(format!("github: {e}")))?;
+        .map_err(|e| format!("github: {e}"))?;
     let status = resp.status();
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| AppError::Pty(format!("github: {e}")))?;
+        .map_err(|e| format!("github: {e}"))?;
     if !status.is_success() {
         let msg = body["message"].as_str().unwrap_or("request failed");
-        return Err(AppError::Pty(format!("github ({status}): {msg}")));
+        return Err(format!("github ({status}): {msg}"));
     }
     Ok(body)
 }
 
-pub async fn api_patch(token: &str, path: &str, payload: serde_json::Value) -> AppResult<serde_json::Value> {
+pub async fn api_patch(token: &str, path: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
     let resp = http()
         .patch(format!("{API}{path}"))
         .bearer_auth(token)
@@ -136,20 +135,20 @@ pub async fn api_patch(token: &str, path: &str, payload: serde_json::Value) -> A
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::Pty(format!("github: {e}")))?;
+        .map_err(|e| format!("github: {e}"))?;
     let status = resp.status();
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| AppError::Pty(format!("github: {e}")))?;
+        .map_err(|e| format!("github: {e}"))?;
     if !status.is_success() {
         let msg = body["message"].as_str().unwrap_or("request failed");
-        return Err(AppError::Pty(format!("github ({status}): {msg}")));
+        return Err(format!("github ({status}): {msg}"));
     }
     Ok(body)
 }
 
-pub async fn graphql(token: &str, query: &str, variables: serde_json::Value) -> AppResult<serde_json::Value> {
+pub async fn graphql(token: &str, query: &str, variables: serde_json::Value) -> Result<serde_json::Value, String> {
     let payload = json!({ "query": query, "variables": variables });
     let resp = http()
         .post(format!("{API}/graphql"))
@@ -157,20 +156,20 @@ pub async fn graphql(token: &str, query: &str, variables: serde_json::Value) -> 
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::Pty(format!("github graphql: {e}")))?;
+        .map_err(|e| format!("github graphql: {e}"))?;
     let status = resp.status();
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| AppError::Pty(format!("github graphql: {e}")))?;
+        .map_err(|e| format!("github graphql: {e}"))?;
     if !status.is_success() {
         let msg = body["message"].as_str().unwrap_or("request failed");
-        return Err(AppError::Pty(format!("github graphql ({status}): {msg}")));
+        return Err(format!("github graphql ({status}): {msg}"));
     }
     if let Some(errs) = body["errors"].as_array() {
         if !errs.is_empty() {
             let msg = errs[0]["message"].as_str().unwrap_or("graphql error");
-            return Err(AppError::Pty(format!("github graphql: {msg}")));
+            return Err(format!("github graphql: {msg}"));
         }
     }
     Ok(body["data"].clone())

@@ -1,5 +1,5 @@
 import * as monaco from "monaco-editor";
-import { invoke } from "@tauri-apps/api/core";
+import { safeInvoke } from "./tauri";
 
 export interface FileContentDto {
   path: string;
@@ -141,7 +141,7 @@ export async function configureMonacoTypeScriptForWorkspace(rootPath: string): P
   // Try reading workspace tsconfig.json
   try {
     const tsconfigPath = `${rootPath.replace(/[/\\]$/, "")}/tsconfig.json`;
-    const content = await invoke<string>("read_file_content", { path: tsconfigPath });
+    const content = await safeInvoke<string>("read_file_content", { path: tsconfigPath });
     if (content) {
       const stripped = stripJsonComments(content);
       const parsed = JSON.parse(stripped);
@@ -208,7 +208,7 @@ export async function configureMonacoTypeScriptForWorkspace(rootPath: string): P
   // Load workspace node_modules type definitions (.d.ts files)
   let hasReactTypes = false;
   try {
-    const typeFiles = await invoke<FileContentDto[]>("get_workspace_type_defs", { rootPath });
+    const typeFiles = await safeInvoke<FileContentDto[]>("get_workspace_type_defs", { rootPath });
     for (const file of typeFiles) {
       if (file.path.includes("@types/react")) {
         hasReactTypes = true;
@@ -234,7 +234,7 @@ export async function configureMonacoTypeScriptForWorkspace(rootPath: string): P
 
   // Load workspace source files (.ts and .tsx) into Monaco models for cross-file navigation
   try {
-    const sourceFiles = await invoke<FileContentDto[]>("get_workspace_source_files", { rootPath });
+    const sourceFiles = await safeInvoke<FileContentDto[]>("get_workspace_source_files", { rootPath });
     for (const src of sourceFiles) {
       const uri = monaco.Uri.file(src.path);
       let existingModel = monaco.editor.getModel(uri);

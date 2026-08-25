@@ -7,7 +7,7 @@ members = [
     "crates/aster-config",
     "crates/aster-ui",
     "crates/aster-app",
-    "src-tauri",
+    "crates/aster-sidecar",
 ]
 resolver = "2"
 

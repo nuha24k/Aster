@@ -1,11 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
-use crate::error::AppResult;
-
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct PersistedState {
     /// GitHub account logins (tokens live in the Keychain, one entry each)
     #[serde(default)]
@@ -31,11 +28,12 @@ pub fn load() -> PersistedState {
         .unwrap_or_default()
 }
 
-pub fn save(state: &PersistedState) -> AppResult<()> {
+pub fn save(state: &PersistedState) -> Result<(), String> {
     let path = state_file();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(&path, serde_json::to_string_pretty(state)?)?;
+    let json_str = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
+    fs::write(&path, json_str).map_err(|e| e.to_string())?;
     Ok(())
 }

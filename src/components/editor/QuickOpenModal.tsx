@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Search, FileCode, FileText, FileJson, Code2, File } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { safeInvoke } from "../../utils/tauri";
 import { FileItem } from "../../types";
 
 interface QuickOpenModalProps {
@@ -31,7 +31,7 @@ export const QuickOpenModal: React.FC<QuickOpenModalProps> = ({
       const fetchWorkspaceFiles = async () => {
         try {
           const collectFiles = async (dir: string): Promise<{ path: string; name: string; relPath: string }[]> => {
-            const items = await invoke<FileItem[]>("list_dir_files", { path: dir });
+            const items = await safeInvoke<FileItem[]>("list_dir_files", { path: dir });
             let result: { path: string; name: string; relPath: string }[] = [];
             for (const item of items) {
               const rel = item.path.replace(rootPath, "").replace(/^[/\\]/, "");

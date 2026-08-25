@@ -7,7 +7,7 @@ import React, {
 import { LayoutNode } from "../types";
 import { TerminalView, TerminalHandle } from "./TerminalView";
 import { useWorkspaceStore } from "../store";
-import { listen } from "@tauri-apps/api/event";
+import { subscribeMenu } from "../api/client";
 import {
   Columns2,
   Rows2,
@@ -186,14 +186,14 @@ export const LayoutNodeRenderer: React.FC<LayoutNodeRendererProps> = ({ node, cw
 
   // Edit ▸ Find / Find Next / Find Previous, while the terminal is on screen.
   useEffect(() => {
-    const unlisten = listen<string>("menu", ({ payload: id }) => {
+    const unsubscribe = subscribeMenu((id) => {
       if (useWorkspaceStore.getState().activeSurface !== "Terminal") return;
       if (id === "find") setSearchOpen((v) => !v);
       if (id === "find_next") searchStep(false);
       if (id === "find_prev") searchStep(true);
     });
     return () => {
-      unlisten.then((off) => off());
+      unsubscribe();
     };
   }, [searchQuery, focusedPane]); // eslint-disable-line react-hooks/exhaustive-deps
 

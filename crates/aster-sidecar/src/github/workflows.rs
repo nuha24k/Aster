@@ -1,16 +1,13 @@
-use tauri::State;
-use crate::error::AppError;
-use crate::AppState;
 use super::client::{api_get, http, require_token};
 use super::types::{GhIssue, WorkflowJob, WorkflowRun};
+use crate::state::ServerState;
 
-#[tauri::command]
 pub async fn gh_issues_list(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
-) -> Result<Vec<GhIssue>, AppError> {
-    let token = require_token(&state)?;
+) -> Result<Vec<GhIssue>, String> {
+    let token = require_token(state)?;
     let body = api_get(
         &token,
         &format!("/repos/{owner}/{name}/issues?state=open&per_page=30&pulls=false"),
@@ -45,14 +42,13 @@ pub async fn gh_issues_list(
         .unwrap_or_default())
 }
 
-#[tauri::command]
 pub async fn gh_workflow_runs(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     branch: Option<String>,
-) -> Result<Vec<WorkflowRun>, AppError> {
-    let token = require_token(&state)?;
+) -> Result<Vec<WorkflowRun>, String> {
+    let token = require_token(state)?;
     let branch_q = branch
         .as_deref()
         .map(|b| format!("&branch={b}"))
@@ -79,14 +75,13 @@ pub async fn gh_workflow_runs(
         .unwrap_or_default())
 }
 
-#[tauri::command]
 pub async fn gh_workflow_jobs(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     run_id: u64,
-) -> Result<Vec<WorkflowJob>, AppError> {
-    let token = require_token(&state)?;
+) -> Result<Vec<WorkflowJob>, String> {
+    let token = require_token(state)?;
     let body = api_get(
         &token,
         &format!("/repos/{owner}/{name}/actions/runs/{run_id}/jobs?per_page=30"),
@@ -109,24 +104,23 @@ pub async fn gh_workflow_jobs(
         .unwrap_or_default())
 }
 
-#[tauri::command]
 pub async fn gh_job_log(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     job_id: u64,
-) -> Result<String, AppError> {
-    let token = require_token(&state)?;
+) -> Result<String, String> {
+    let token = require_token(state)?;
     let text = http()
         .get(format!("{}/repos/{owner}/{name}/actions/jobs/{job_id}/logs", super::client::API))
         .bearer_auth(&token)
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .map_err(|e| AppError::Pty(format!("github: {e}")))?
+        .map_err(|e| format!("github: {e}"))?
         .text()
         .await
-        .map_err(|e| AppError::Pty(format!("github log: {e}")))?;
+        .map_err(|e| format!("github log: {e}"))?;
     let clean = strip_ansi(&text);
     let lines: Vec<&str> = clean.lines().collect();
     let start = lines.len().saturating_sub(200);

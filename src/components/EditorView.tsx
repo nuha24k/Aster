@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { safeInvoke } from "../utils/tauri";
+import { subscribeMenu } from "../api/client";
 import { useWorkspaceStore } from "../store";
 import Editor, { OnMount } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import { FileItem, EditorTabItem } from "../types";
-import { isTauriEnvironment } from "../utils/tauri";
 import { computeLineDiff } from "../utils/gitDiff";
 import { configureMonacoTypeScriptForWorkspace } from "../utils/monacoTypeScript";
 import { initLspBridge, lspNotifyOpen, lspNotifyChange, lspNotifySave } from "../utils/monacoLsp";
@@ -75,8 +74,8 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
   // Load directory children
   const loadChildren = async (dirPath: string): Promise<TreeNode[]> => {
     try {
-      const items = await invoke<FileItem[]>("list_dir_files", { path: dirPath });
-      return items.map((f) => ({
+      const items = await safeInvoke<FileItem[]>("list_dir_files", { path: dirPath });
+      return items.map((f: FileItem) => ({
         name: f.name,
         path: f.path,
         is_dir: f.is_dir,
@@ -104,16 +103,11 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
 
   // Open native OS Folder Dialog
   const handleOpenFolderDialog = async () => {
-    if (!isTauriEnvironment()) {
-      const p = window.prompt("Enter absolute folder path:", currentRoot);
-      if (p?.trim()) setCurrentRoot(p.trim());
-      return;
-    }
     try {
-      const selected = await invoke<string | null>("open_folder_dialog");
+      const selected = await safeInvoke<string | null>("open_folder_dialog");
       if (selected) {
         setCurrentRoot(selected);
-        invoke("add_recent_folder", { path: selected }).catch(() => {});
+        safeInvoke("add_recent_folder", { path: selected }).catch(() => {});
       }
     } catch {
       const p = window.prompt("Enter absolute folder path:", currentRoot);
@@ -125,60 +119,67 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
   const handleOpenInFinder = async () => {
     if (!currentRoot) return;
     try {
-      await invoke("open_in_finder", { path: currentRoot });
+      await safeInvoke("open_in_finder", { path: currentRoot });
     } catch (err) {
       console.error("Failed to open Finder:", err);
     }
   };
 
-  // Directory Tree Toggle
-  const toggleFolder = async (node: TreeNode) => {
-    const next = new Set(expandedFolders);
-    if (next.has(node.path)) {
-      next.delete(node.path);
-      setExpandedFolders(next);
-    } else {
-      next.add(node.path);
-      setExpandedFolders(next);
-      if (!node.loaded) {
-        const children = await loadChildren(node.path);
-        const sorted = [...children].sort((a, b) =>
-          (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0) || a.name.localeCompare(b.name)
-        );
-        setTree((prev) => updateTreeNodeChildren(prev, node.path, sorted));
-      }
-    }
-  };
-
-  const updateTreeNodeChildren = (
-    nodes: TreeNode[],
-    targetPath: string,
-    children: TreeNode[]
-  ): TreeNode[] => {
-    return nodes.map((node) => {
-      if (node.path === targetPath) {
-        return { ...node, children, loaded: true };
-      }
-      if (node.is_dir && node.children) {
-        return {
-          ...node,
-          children: updateTreeNodeChildren(node.children, targetPath, children),
-        };
-      }
-      return node;
+  // Helper to find and update nodes in the tree
+  const updateNodeInTree = (nodes: TreeNode[], path: string, updater: (node: TreeNode) => TreeNode): TreeNode[] => {
+    return nodes.map((n) => {
+      if (n.path === path) return updater(n);
+      if (n.children) return { ...n, children: updateNodeInTree(n.children, path, updater) };
+      return n;
     });
   };
 
-  // Open file in Editor
+  // Directory Tree Toggle
+  const toggleFolder = async (node: TreeNode) => {
+    setTree((prev) =>
+      updateNodeInTree(prev, node.path, (n) => ({
+        ...n,
+        loading: !n.loaded,
+      }))
+    );
+
+    if (!node.loaded) {
+      const children = await loadChildren(node.path);
+      const sorted = [...children].sort((a, b) =>
+        (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0) || a.name.localeCompare(b.name)
+      );
+
+      setTree((prev) =>
+        updateNodeInTree(prev, node.path, (n) => ({
+          ...n,
+          children: sorted,
+          loaded: true,
+          loading: false,
+        }))
+      );
+    }
+
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(node.path)) {
+        next.delete(node.path);
+      } else {
+        next.add(node.path);
+      }
+      return next;
+    });
+  };
+
+  // Open File into Editor Tab
   const handleOpenFile = async (node: { name: string; path: string }) => {
-    const existing = tabs.find((t) => t.path === node.path);
-    if (existing) {
+    const existingIndex = tabs.findIndex((t) => t.path === node.path);
+    if (existingIndex !== -1) {
       setActiveTabPath(node.path);
       return;
     }
 
     try {
-      const content = await invoke<string>("read_file_content", { path: node.path });
+      const content = await safeInvoke<string>("read_file_content", { path: node.path });
       const language = getLanguageFromPath(node.name);
 
       const newTab: EditorTabItem = {
@@ -200,7 +201,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
   const isUntitled = (path: string) => path.startsWith("untitled:");
 
   const writeTab = async (tab: EditorTabItem, path: string) => {
-    await invoke("save_file_content", { path, content: tab.content });
+    await safeInvoke("save_file_content", { path, content: tab.content });
     lspNotifySave(path, tab.language).catch(console.error);
     const name = path.split(/[/\\]/).pop() || path;
     setTabs((prev) => prev.map((t) => (t.path === tab.path ? { ...t, path, name, isDirty: false } : t)));
@@ -218,17 +219,17 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
 
   /** File ▸ New File… — asks for the path up front and creates it on disk. */
   const handleNewFileOnDisk = async () => {
-    const chosen = await invoke<string | null>("save_file_dialog", { defaultName: "untitled.txt" })
+    const chosen = await safeInvoke<string | null>("save_file_dialog", { default_name: "untitled.txt" })
       .catch(() => null);
     if (!chosen) return;
-    await invoke("save_file_content", { path: chosen, content: "" }).catch(console.error);
+    await safeInvoke("save_file_content", { path: chosen, content: "" }).catch(console.error);
     loadRoot(currentRoot);
     const name = chosen.split(/[/\\]/).pop() || chosen;
     handleOpenFile({ name, path: chosen });
   };
 
   const handleOpenFileDialog = async () => {
-    const selected = await invoke<string | null>("open_file_dialog").catch(() => null);
+    const selected = await safeInvoke<string | null>("open_file_dialog").catch(() => null);
     if (selected) {
       const name = selected.split(/[/\\]/).pop() || selected;
       handleOpenFile({ name, path: selected });
@@ -240,8 +241,8 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     if (!activeTab) return;
     let path = activeTab.path;
     if (saveAs || isUntitled(path)) {
-      const chosen = await invoke<string | null>("save_file_dialog", {
-        defaultName: isUntitled(path) ? "untitled.txt" : activeTab.name,
+      const chosen = await safeInvoke<string | null>("save_file_dialog", {
+        default_name: isUntitled(path) ? "untitled.txt" : activeTab.name,
       }).catch(() => null);
       if (!chosen) return;
       path = chosen;
@@ -259,7 +260,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
   const handleRevertFile = async () => {
     if (!activeTab || isUntitled(activeTab.path)) return;
     try {
-      const content = await invoke<string>("read_file_content", { path: activeTab.path });
+      const content = await safeInvoke<string>("read_file_content", { path: activeTab.path });
       setTabs((prev) =>
         prev.map((t) => (t.path === activeTab.path ? { ...t, content, isDirty: false } : t))
       );
@@ -327,7 +328,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
 
     let headText: string | null = null;
     try {
-      headText = await invoke<string>("git_file_head", {
+      headText = await safeInvoke<string>("git_file_head", {
         repo: currentRoot,
         path: filePath,
       });
@@ -518,7 +519,7 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
 
   // Native menu listener
   useEffect(() => {
-    const unlisten = listen<string>("menu", ({ payload: id }) => {
+    const unsubscribe = subscribeMenu((id) => {
       switch (id) {
         case "save": handleSaveFile(); break;
         case "save_as": handleSaveFile(true); break;
@@ -560,12 +561,15 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
       }
     });
     return () => {
-      unlisten.then((off) => off());
+      unsubscribe();
     };
   }, [activeTab, tabs, activeTabPath, currentRoot, activeSurface, closedTabsHistory]);
 
   const lineCount = activeTab ? activeTab.content.split("\n").length : 0;
-  const rootFolderName = currentRoot.split(/[/\\]/).filter(Boolean).pop() || "Workspace";
+  const rootFolderName =
+    typeof currentRoot === "string" && currentRoot
+      ? currentRoot.split(/[/\\]/).filter(Boolean).pop() || "Workspace"
+      : "Workspace";
 
   const commandPaletteItems: CommandItem[] = [
     {

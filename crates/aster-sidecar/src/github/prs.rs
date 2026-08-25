@@ -1,10 +1,8 @@
-use serde::Serialize;
-use serde_json::json;
-use tauri::State;
-use crate::error::AppError;
-use crate::AppState;
 use super::client::{api_get, api_post, api_put, graphql, require_token};
 use super::types::{CheckRun, CheckSummary, Pr, PrDetail, PrFile, ReviewThread, ThreadComment, TimelineItem};
+use crate::state::ServerState;
+use serde::Serialize;
+use serde_json::json;
 
 fn parse_pr(v: &serde_json::Value) -> Pr {
     Pr {
@@ -21,14 +19,13 @@ fn parse_pr(v: &serde_json::Value) -> Pr {
     }
 }
 
-#[tauri::command]
 pub async fn gh_pr_for_branch(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     branch: String,
-) -> Result<Option<Pr>, AppError> {
-    let token = require_token(&state)?;
+) -> Result<Option<Pr>, String> {
+    let token = require_token(state)?;
     let body = api_get(
         &token,
         &format!("/repos/{owner}/{name}/pulls?head={owner}:{branch}&state=open"),
@@ -37,21 +34,20 @@ pub async fn gh_pr_for_branch(
     Ok(body.as_array().and_then(|prs| prs.first()).map(parse_pr))
 }
 
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone, Default, Debug)]
 pub struct ReviewSummary {
     pub approved: u64,
     pub changes_requested: u64,
     pub commented: u64,
 }
 
-#[tauri::command]
 pub async fn gh_pr_reviews(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     number: u64,
-) -> Result<ReviewSummary, AppError> {
-    let token = require_token(&state)?;
+) -> Result<ReviewSummary, String> {
+    let token = require_token(state)?;
     let body = api_get(
         &token,
         &format!("/repos/{owner}/{name}/pulls/{number}/reviews?per_page=100"),
@@ -64,9 +60,15 @@ pub async fn gh_pr_reviews(
         for review in reviews {
             let user = review["user"]["login"].as_str().unwrap_or_default().to_string();
             match review["state"].as_str() {
-                Some("APPROVED") => { decisive.insert(user, "approved"); }
-                Some("CHANGES_REQUESTED") => { decisive.insert(user, "changes"); }
-                Some("COMMENTED") => { commenters.insert(user); }
+                Some("APPROVED") => {
+                    decisive.insert(user, "approved");
+                }
+                Some("CHANGES_REQUESTED") => {
+                    decisive.insert(user, "changes");
+                }
+                Some("COMMENTED") => {
+                    commenters.insert(user);
+                }
                 _ => {}
             }
         }
@@ -78,28 +80,26 @@ pub async fn gh_pr_reviews(
     })
 }
 
-#[tauri::command]
 pub async fn gh_list_prs(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
-) -> Result<Vec<Pr>, AppError> {
-    let token = require_token(&state)?;
+) -> Result<Vec<Pr>, String> {
+    let token = require_token(state)?;
     let body = api_get(&token, &format!("/repos/{owner}/{name}/pulls?state=open&per_page=30")).await?;
     Ok(body.as_array().map(|prs| prs.iter().map(parse_pr).collect()).unwrap_or_default())
 }
 
-#[tauri::command]
 pub async fn gh_create_pr(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     head: String,
     base: String,
     title: String,
     body: Option<String>,
-) -> Result<Pr, AppError> {
-    let token = require_token(&state)?;
+) -> Result<Pr, String> {
+    let token = require_token(state)?;
     let pr = api_post(
         &token,
         &format!("/repos/{owner}/{name}/pulls"),
@@ -244,14 +244,13 @@ fn parse_timeline(items: &serde_json::Value) -> Vec<TimelineItem> {
     timeline
 }
 
-#[tauri::command]
 pub async fn gh_pr_detail(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     number: u64,
-) -> Result<PrDetail, AppError> {
-    let token = require_token(&state)?;
+) -> Result<PrDetail, String> {
+    let token = require_token(state)?;
     let base = format!("/repos/{owner}/{name}");
 
     let pr = api_get(&token, &format!("{base}/pulls/{number}")).await?;
@@ -303,14 +302,13 @@ pub async fn gh_pr_detail(
     })
 }
 
-#[tauri::command]
 pub async fn gh_pr_files(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     number: u64,
-) -> Result<Vec<PrFile>, AppError> {
-    let token = require_token(&state)?;
+) -> Result<Vec<PrFile>, String> {
+    let token = require_token(state)?;
     let body = api_get(
         &token,
         &format!("/repos/{owner}/{name}/pulls/{number}/files?per_page=100"),
@@ -333,16 +331,15 @@ pub async fn gh_pr_files(
         .unwrap_or_default())
 }
 
-#[tauri::command]
 pub async fn gh_pr_reply_thread(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     number: u64,
     comment_id: u64,
     body: String,
-) -> Result<(), AppError> {
-    let token = require_token(&state)?;
+) -> Result<(), String> {
+    let token = require_token(state)?;
     api_post(
         &token,
         &format!("/repos/{owner}/{name}/pulls/{number}/comments"),
@@ -352,13 +349,12 @@ pub async fn gh_pr_reply_thread(
     .map(|_| ())
 }
 
-#[tauri::command]
 pub async fn gh_pr_resolve_thread(
-    state: State<'_, AppState>,
+    state: &ServerState,
     thread_id: String,
     resolved: bool,
-) -> Result<(), AppError> {
-    let token = require_token(&state)?;
+) -> Result<(), String> {
+    let token = require_token(state)?;
     let mutation = if resolved {
         "mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { isResolved } } }"
     } else {
@@ -367,15 +363,14 @@ pub async fn gh_pr_resolve_thread(
     graphql(&token, mutation, json!({ "id": thread_id })).await.map(|_| ())
 }
 
-#[tauri::command]
 pub async fn gh_pr_comment(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     number: u64,
     body: String,
-) -> Result<(), AppError> {
-    let token = require_token(&state)?;
+) -> Result<(), String> {
+    let token = require_token(state)?;
     api_post(
         &token,
         &format!("/repos/{owner}/{name}/issues/{number}/comments"),
@@ -385,15 +380,14 @@ pub async fn gh_pr_comment(
     .map(|_| ())
 }
 
-#[tauri::command]
 pub async fn gh_pr_merge(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     number: u64,
     method: String,
-) -> Result<(), AppError> {
-    let token = require_token(&state)?;
+) -> Result<(), String> {
+    let token = require_token(state)?;
     api_put(
         &token,
         &format!("/repos/{owner}/{name}/pulls/{number}/merge"),
@@ -403,14 +397,13 @@ pub async fn gh_pr_merge(
     .map(|_| ())
 }
 
-#[tauri::command]
 pub async fn gh_pr_mark_ready(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     number: u64,
-) -> Result<(), AppError> {
-    let token = require_token(&state)?;
+) -> Result<(), String> {
+    let token = require_token(state)?;
     let pr = api_get(&token, &format!("/repos/{owner}/{name}/pulls/{number}")).await?;
     let node_id = pr["node_id"].as_str().unwrap_or_default();
     let mutation = r#"
@@ -424,14 +417,13 @@ mutation($id: ID!) {
         .map(|_| ())
 }
 
-#[tauri::command]
 pub async fn gh_pr_checks(
-    state: State<'_, AppState>,
+    state: &ServerState,
     owner: String,
     name: String,
     sha: String,
-) -> Result<CheckSummary, AppError> {
-    let token = require_token(&state)?;
+) -> Result<CheckSummary, String> {
+    let token = require_token(state)?;
     let body = api_get(&token, &format!("/repos/{owner}/{name}/commits/{sha}/check-runs?per_page=100")).await?;
     let mut summary = CheckSummary { total: 0, passed: 0, failed: 0, pending: 0 };
     if let Some(runs) = body["check_runs"].as_array() {

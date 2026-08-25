@@ -66,9 +66,10 @@ export const CockpitBar: React.FC = () => {
   const branchDropdownRef = useRef<HTMLDivElement>(null);
 
   // Shorten path to last 2 segments
-  const cwdDisplay = effectiveRepoPath
-    ? effectiveRepoPath.split(/[/\\]/).filter(Boolean).slice(-2).join("/")
-    : "";
+  const cwdDisplay =
+    typeof effectiveRepoPath === "string" && effectiveRepoPath
+      ? effectiveRepoPath.split(/[/\\]/).filter(Boolean).slice(-2).join("/")
+      : "";
 
   const activeStatus = gitStore.statusByRepo[effectiveRepoPath] || null;
 

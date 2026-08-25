@@ -3,22 +3,61 @@
   "version": "1.0.0",
   "description": "ASTER Developer Workspace",
   "type": "module",
+  "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
+    "electron:dev": "electron .",
     "build": "vite build",
+    "package": "cargo build --release --bin aster-core && vite build && electron-builder",
     "check": "tsc --noEmit"
+  },
+  "build": {
+    "appId": "dev.aster.app",
+    "productName": "ASTER",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "target/release/aster-core",
+        "to": "aster-core"
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    }
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
-    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
     "autoprefixer": "^10.5.4",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
@@ -27,7 +66,6 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
-    "@tauri-apps/api": "^2.11.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^6.0.0",

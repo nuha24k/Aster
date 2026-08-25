@@ -1,12 +1,12 @@
-pub mod types;
-pub mod client;
 pub mod auth;
-pub mod remote;
+pub mod client;
 pub mod prs;
+pub mod remote;
+pub mod types;
 pub mod workflows;
 
-pub use types::*;
 pub use auth::*;
-pub use remote::*;
 pub use prs::*;
+pub use remote::*;
+pub use types::*;
 pub use workflows::*;

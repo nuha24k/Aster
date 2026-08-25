@@ -1,6 +1,6 @@
 import * as monaco from "monaco-editor";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { safeInvoke } from "./tauri";
+import { subscribeNotification } from "../api/client";
 
 interface LspNotificationPayload {
   server_id: string;
@@ -10,7 +10,7 @@ interface LspNotificationPayload {
 
 const activeServersByLanguage: Record<string, string> = {};
 let isLspListenerInitialized = false;
-let _unlistenFn: UnlistenFn | null = null;
+let _unlistenFn: (() => void) | null = null;
 let isProvidersRegistered = false;
 
 export async function disposeLspBridge(): Promise<void> {
@@ -38,8 +38,9 @@ export async function initLspBridge(): Promise<void> {
   if (isLspListenerInitialized) return;
   isLspListenerInitialized = true;
 
-  _unlistenFn = await listen<LspNotificationPayload>("lsp_notification", (event) => {
-    const { method, params } = event.payload;
+  _unlistenFn = subscribeNotification((payload: LspNotificationPayload) => {
+    if (!payload) return;
+    const { method, params } = payload;
 
     if (method === "textDocument/publishDiagnostics" && params && params.uri) {
       try {
@@ -78,13 +79,12 @@ export async function ensureLspServer(language: string, rootPath: string): Promi
   }
 
   try {
-    const serverId = await invoke<string>("lsp_start_server", { language, rootPath });
+    const serverId = await safeInvoke<string>("lsp_start_server", { language, rootPath });
     if (serverId) {
       activeServersByLanguage[langKey] = serverId;
       return serverId;
     }
   } catch (err) {
-    // If LSP binary not available locally, log warning and gracefully fallback
     console.warn(`LSP server for '${language}' not active:`, err);
   }
   return null;
@@ -96,7 +96,7 @@ export async function lspNotifyOpen(filePath: string, language?: string, content
   if (!serverId) return;
 
   const fileUri = monaco.Uri.file(filePath).toString();
-  await invoke("lsp_send_notification", {
+  await safeInvoke("lsp_send_notification", {
     serverId,
     method: "textDocument/didOpen",
     params: {
@@ -116,7 +116,7 @@ export async function lspNotifyChange(filePath: string, language?: string, conte
   if (!serverId) return;
 
   const fileUri = monaco.Uri.file(filePath).toString();
-  await invoke("lsp_send_notification", {
+  await safeInvoke("lsp_send_notification", {
     serverId,
     method: "textDocument/didChange",
     params: {
@@ -139,7 +139,7 @@ export async function lspNotifySave(filePath: string, language?: string): Promis
   if (!serverId) return;
 
   const fileUri = monaco.Uri.file(filePath).toString();
-  await invoke("lsp_send_notification", {
+  await safeInvoke("lsp_send_notification", {
     serverId,
     method: "textDocument/didSave",
     params: {
@@ -163,7 +163,7 @@ function registerMonacoLspProviders(): void {
       if (!serverId) return null;
 
       try {
-        const res = await invoke<any>("lsp_send_request", {
+        const res = await safeInvoke<any>("lsp_send_request", {
           serverId,
           method: "textDocument/hover",
           params: {
@@ -197,7 +197,7 @@ function registerMonacoLspProviders(): void {
       if (!serverId) return null;
 
       try {
-        const res = await invoke<any>("lsp_send_request", {
+        const res = await safeInvoke<any>("lsp_send_request", {
           serverId,
           method: "textDocument/definition",
           params: {
@@ -232,7 +232,7 @@ function registerMonacoLspProviders(): void {
       if (!serverId) return { suggestions: [] };
 
       try {
-        const res = await invoke<any>("lsp_send_request", {
+        const res = await safeInvoke<any>("lsp_send_request", {
           serverId,
           method: "textDocument/completion",
           params: {

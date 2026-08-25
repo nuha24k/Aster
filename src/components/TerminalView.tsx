@@ -3,7 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
-import { safeInvoke, isTauriEnvironment } from "../utils/tauri";
+import { safeInvoke, isDesktopEnvironment } from "../utils/tauri";
 import { useWorkspaceStore } from "../store";
 import { useAutocompleteStore } from "../autocompleteStore";
 import {
@@ -371,16 +371,17 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
       let pollerId: number | null = null;
 
       const initTerminal = async () => {
-        if (!isTauriEnvironment()) {
-          term?.writeln("\x1b[33mRunning in browser — PTY unavailable.\x1b[0m");
+        if (!isDesktopEnvironment()) {
+          term?.writeln("\x1b[33mRunning in Web Browser — PTY Desktop session unavailable.\x1b[0m");
           return;
         }
         try {
-          const spawnedId = await safeInvoke<string>("spawn_terminal", {
+          const res = await safeInvoke<any>("spawn_terminal", {
             sessionId: id,
             cwd: cwd || null,
           });
           if (isDisposed) return;
+          const spawnedId = typeof res === "object" && res !== null && "sessionId" in res ? res.sessionId : String(res || id);
           ptySessionIdRef.current = spawnedId;
           if (term?.cols && term?.rows) {
             safeInvoke("resize_terminal", {
@@ -397,16 +398,18 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(
         const pollOutput = async () => {
           if (isDisposed) return;
           try {
-            const output = await safeInvoke<string>("read_terminal_output", {
+            const resOutput = await safeInvoke<any>("read_terminal_output", {
               sessionId: ptySessionIdRef.current,
             });
+            const output = typeof resOutput === "object" && resOutput !== null && "data" in resOutput ? resOutput.data : (typeof resOutput === "string" ? resOutput : "");
             if (output && output.length > 0 && !isDisposed && term) {
               term.write(output);
             }
             if (isActiveRef.current) {
-              const newCwd = await safeInvoke<string>("get_terminal_cwd", {
+              const resCwd = await safeInvoke<any>("get_terminal_cwd", {
                 sessionId: ptySessionIdRef.current,
               });
+              const newCwd = typeof resCwd === "object" && resCwd !== null && "cwd" in resCwd ? resCwd.cwd : (typeof resCwd === "string" ? resCwd : "");
               if (newCwd && !isDisposed) updateActiveTerminalCwd(newCwd);
             }
           } catch (_) {}
