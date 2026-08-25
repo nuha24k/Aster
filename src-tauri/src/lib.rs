@@ -255,7 +255,7 @@ fn collect_dts_files(dir: &std::path::Path, acc: &mut Vec<FileContentDto>, max_f
                 let file_name = path.file_name().unwrap_or_default().to_string_lossy();
                 if file_name.ends_with(".d.ts") {
                     if let Ok(metadata) = entry.metadata() {
-                        if metadata.len() <= 1_000_000 {
+                        if metadata.len() <= 200_000 {
                             if let Ok(bytes) = std::fs::read(&path) {
                                 acc.push(FileContentDto {
                                     path: path.to_string_lossy().to_string(),
@@ -289,7 +289,7 @@ fn collect_source_files(dir: &std::path::Path, acc: &mut Vec<FileContentDto>, ma
             } else if path.is_file() {
                 if (name.ends_with(".ts") || name.ends_with(".tsx")) && !name.ends_with(".d.ts") {
                     if let Ok(metadata) = entry.metadata() {
-                        if metadata.len() <= 500_000 {
+                        if metadata.len() <= 200_000 {
                             if let Ok(bytes) = std::fs::read(&path) {
                                 acc.push(FileContentDto {
                                     path: path.to_string_lossy().to_string(),
@@ -310,7 +310,7 @@ fn get_workspace_type_defs(root_path: String) -> Result<Vec<FileContentDto>, Str
     let mut acc = Vec::new();
     let node_modules = root.join("node_modules");
     if node_modules.exists() {
-        collect_dts_files(&node_modules, &mut acc, 1000);
+        collect_dts_files(&node_modules, &mut acc, 80);
     }
     Ok(acc)
 }
@@ -319,8 +319,11 @@ fn get_workspace_type_defs(root_path: String) -> Result<Vec<FileContentDto>, Str
 fn get_workspace_source_files(root_path: String) -> Result<Vec<FileContentDto>, String> {
     let root = PathBuf::from(&root_path);
     let mut acc = Vec::new();
-    if root.exists() {
-        collect_source_files(&root, &mut acc, 500);
+    let src = root.join("src");
+    if src.exists() {
+        collect_source_files(&src, &mut acc, 30);
+    } else if root.exists() {
+        collect_source_files(&root, &mut acc, 30);
     }
     Ok(acc)
 }

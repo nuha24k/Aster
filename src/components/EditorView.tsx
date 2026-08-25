@@ -269,6 +269,27 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     }
   };
 
+  const cursorListenerRef = useRef<monaco.IDisposable | null>(null);
+
+  // Clean up all Monaco models on unmount
+  useEffect(() => {
+    return () => {
+      if (cursorListenerRef.current) {
+        cursorListenerRef.current.dispose();
+      }
+      if (diffDebounceRef.current) {
+        clearTimeout(diffDebounceRef.current);
+      }
+      Object.values(modelsRef.current).forEach((m) => {
+        if (m && !m.isDisposed()) {
+          m.dispose();
+        }
+      });
+      modelsRef.current = {};
+      viewStatesRef.current = {};
+    };
+  }, []);
+
   // Close tab & Reopen tab
   const handleCloseTab = (path: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -281,6 +302,15 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
     if (activeTabPath === path) {
       setActiveTabPath(remaining.length > 0 ? remaining[remaining.length - 1].path : null);
     }
+
+    // Dispose Monaco model to prevent memory leaks
+    if (modelsRef.current[path]) {
+      if (!modelsRef.current[path].isDisposed()) {
+        modelsRef.current[path].dispose();
+      }
+      delete modelsRef.current[path];
+    }
+    delete viewStatesRef.current[path];
   };
 
   const handleReopenClosedTab = () => {
@@ -370,7 +400,10 @@ export const EditorView: React.FC<EditorViewProps> = ({ rootPath }) => {
       configureMonacoTypeScriptForWorkspace(currentRoot).catch(console.error);
     }
 
-    editor.onDidChangeCursorPosition((e) => {
+    if (cursorListenerRef.current) {
+      cursorListenerRef.current.dispose();
+    }
+    cursorListenerRef.current = editor.onDidChangeCursorPosition((e) => {
       setCursorPosition({ line: e.position.lineNumber, col: e.position.column });
     });
   };
